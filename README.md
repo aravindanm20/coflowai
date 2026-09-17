@@ -337,6 +337,23 @@ coflowai tools list app.py
 
 ---
 
+## Documentation
+
+📚 **[Complete Documentation](./docs/README.md)** - Start here for comprehensive guides
+
+Quick links:
+- **[Getting Started](./docs/GETTING_STARTED.md)** - Installation and quickstart
+- **[Core Concepts](./docs/CORE_CONCEPTS.md)** - Architecture deep dive
+- **[API Reference](./docs/API_REFERENCE.md)** - Complete API documentation
+- **[User Guide](./docs/USER_GUIDE.md)** - Common patterns and recipes
+- **[Advanced Topics](./docs/ADVANCED.md)** - Distributed execution, security, optimization
+- **[Examples](./docs/EXAMPLES.md)** - Working code examples
+- **[Quick Reference](./docs/QUICK_REFERENCE.md)** - Fast lookup
+- **[Troubleshooting](./docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[Contributing](./docs/CONTRIBUTING.md)** - Contribute to the project
+
+---
+
 ## Repository layout
 
 ```
