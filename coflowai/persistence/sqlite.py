@@ -15,6 +15,7 @@ import asyncio
 import json
 import sqlite3
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS executions (
     output              TEXT,
     error               TEXT,
     policy              TEXT,
+    permissions         TEXT,
     metadata            TEXT,
     parent_execution_id TEXT,
     created_at          TEXT NOT NULL,
@@ -159,27 +161,27 @@ class SqliteStateStore(_SqliteBase, StateStore):
 
     def __init__(self, path: str | Path = "coflowai.db",
                  connection: sqlite3.Connection | None = None,
-                 owner: str = "worker") -> None:
+                 owner: str | None = None) -> None:
         super().__init__(path, connection)
-        self.owner = owner
+        self.owner = owner or uuid.uuid4().hex
 
     # ------------------------------------------------------------- executions
     async def save_execution(self, record: ExecutionRecord) -> None:
         def write() -> None:
             self._connection.execute(
                 "INSERT INTO executions (execution_id, status, executable, "
-                "workflow_hash, input, output, error, policy, metadata, "
+                "workflow_hash, input, output, error, policy, permissions, metadata, "
                 "parent_execution_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(execution_id) DO UPDATE SET "
                 "status=excluded.status, output=excluded.output, "
                 "error=excluded.error, metadata=excluded.metadata, "
                 "updated_at=excluded.updated_at",
                 (record.execution_id, record.status.value, record.executable,
                  record.workflow_hash, _dump(record.input), _dump(record.output),
-                 record.error, _dump(record.policy), _dump(record.metadata),
-                 record.parent_execution_id, record.created_at.isoformat(),
-                 record.updated_at.isoformat()))
+                 record.error, _dump(record.policy), _dump(record.permissions),
+                 _dump(record.metadata), record.parent_execution_id,
+                 record.created_at.isoformat(), record.updated_at.isoformat()))
 
         await self._run(write)
 
@@ -255,6 +257,18 @@ class SqliteStateStore(_SqliteBase, StateStore):
 
         return await self._run(write)
 
+    async def extend_lock(self, execution_id: str, *, ttl: float = 60.0) -> bool:
+        """Extend the lock's TTL. Returns False if we no longer own it."""
+        def write() -> bool:
+            now = time.time()
+            cursor = self._connection.execute(
+                "UPDATE locks SET expires_at = ? "
+                "WHERE execution_id = ? AND owner = ?",
+                (now + ttl, execution_id, self.owner))
+            return cursor.rowcount > 0
+
+        return await self._run(write)
+
     async def release_lock(self, execution_id: str) -> None:
         def write() -> None:
             self._connection.execute(
@@ -296,11 +310,14 @@ def _row_to_event(row: sqlite3.Row) -> Event:
 
 
 def _row_to_record(row: sqlite3.Row) -> ExecutionRecord:
+    # Handle old records without permissions column
+    permissions_data = row.get("permissions") if "permissions" in row.keys() else None
     record = ExecutionRecord(
         execution_id=row["execution_id"], status=ExecutionStatus(row["status"]),
         input=_load(row["input"]), output=_load(row["output"]),
         error=row["error"], executable=row["executable"] or "",
         workflow_hash=row["workflow_hash"], policy=_load(row["policy"], {}),
+        permissions=_load(permissions_data, []),
         metadata=_load(row["metadata"], {}),
         parent_execution_id=row["parent_execution_id"],
     )

@@ -65,6 +65,7 @@ class ExecutionRecord:
     executable: str = ""
     workflow_hash: str | None = None
     policy: dict[str, Any] = field(default_factory=dict)
+    permissions: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_execution_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -83,6 +84,7 @@ class ExecutionRecord:
             "workflow_hash": self.workflow_hash,
             "error": self.error,
             "policy": self.policy,
+            "permissions": self.permissions,
             "metadata": self.metadata,
             "parent_execution_id": self.parent_execution_id,
             "created_at": self.created_at.isoformat(),

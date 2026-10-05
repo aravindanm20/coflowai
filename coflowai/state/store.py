@@ -63,6 +63,10 @@ class StateStore(ABC):
         implement a real lease so two workers never resume the same execution."""
         return True
 
+    async def extend_lock(self, execution_id: str, *, ttl: float = 60.0) -> bool:
+        """Extend an existing lock lease. Returns False if the lock is no longer held."""
+        return True
+
     async def release_lock(self, execution_id: str) -> None:
         return None
 
@@ -104,6 +108,10 @@ class InMemoryStateStore(StateStore):
                 return False
             self._locks.add(execution_id)
             return True
+
+    async def extend_lock(self, execution_id: str, *, ttl: float = 60.0) -> bool:
+        async with self._mutex:
+            return execution_id in self._locks
 
     async def release_lock(self, execution_id: str) -> None:
         async with self._mutex:

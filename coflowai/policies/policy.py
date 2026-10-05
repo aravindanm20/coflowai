@@ -104,6 +104,9 @@ class ExecutionPolicy:
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
             raise ValueError("max_steps must be positive; unbounded loops are forbidden")
+        # Normalize mode from string to enum if needed
+        if isinstance(self.mode, str):
+            self.mode = ExecutionMode(self.mode)
         # keep `retry_attempts` and `retry.attempts` consistent
         if self.retry.attempts != self.retry_attempts:
             self.retry = replace(self.retry, attempts=self.retry_attempts)
@@ -184,4 +187,13 @@ class ExecutionPolicy:
             "checkpoint_enabled": self.checkpoint_enabled,
             "max_concurrency": self.max_concurrency,
             "mode": self.mode.value,
+            "model_timeout_seconds": self.model_timeout_seconds,
+            "tool_timeout_seconds": self.tool_timeout_seconds,
+            "structured_output_repair_attempts": self.structured_output_repair_attempts,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExecutionPolicy":
+        """Reconstruct policy from serialized dict."""
+        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**known)

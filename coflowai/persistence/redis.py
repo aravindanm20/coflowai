@@ -156,6 +156,7 @@ def _to_record(data: dict[str, Any]) -> ExecutionRecord:
         input=data.get("input"), output=data.get("output"),
         error=data.get("error"), executable=data.get("executable", ""),
         workflow_hash=data.get("workflow_hash"), policy=data.get("policy", {}),
+        permissions=data.get("permissions", []),
         metadata=data.get("metadata", {}),
         parent_execution_id=data.get("parent_execution_id"),
     )

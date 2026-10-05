@@ -123,12 +123,30 @@ class Worker:
 
     # -------------------------------------------------------------- dispatch
     async def _execute(self, job: Job) -> ExecutionResult:
+        from ..core.types import TERMINAL_STATUSES
+
         executable = self.executables.get(job.executable) if job.executable else None
-        policy = ExecutionPolicy(**job.policy) if job.policy else None
+        policy = ExecutionPolicy.from_dict(job.policy) if job.policy else None
 
         if job.kind == "run":
             if executable is None:
                 raise ConfigurationError("run job requires an executable name")
+
+            # Check if this is a redelivered job - look for existing execution
+            store = self.runtime.state_store
+            record = await store.get_execution(job.execution_id)
+            if record is not None:
+                # Redelivered after already settling: ack without re-running
+                if record.status in TERMINAL_STATUSES or \
+                        record.status is ExecutionStatus.WAITING_FOR_APPROVAL:
+                    return ExecutionResult(execution_id=record.execution_id,
+                                          status=record.status, output=record.output)
+                # In progress with checkpoint: resume instead of restarting
+                if record.status is not ExecutionStatus.CREATED and \
+                        await store.latest_checkpoint(job.execution_id):
+                    return await self.runtime.resume(job.execution_id,
+                                                     executable=executable, policy=policy)
+
             return await self.runtime.run(executable, job.input, policy=policy,
                                           execution_id=job.execution_id,
                                           metadata=job.metadata)

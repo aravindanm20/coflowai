@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import time
 from typing import Any, AsyncIterator, Iterable
@@ -122,6 +123,7 @@ class Runtime:
             executable=target.name,
             workflow_hash=getattr(target, "hash", None),
             policy=policy.to_dict(),
+            permissions=list(granted.granted),
             metadata=dict(metadata or {}),
         )
         await self.state_store.save_execution(record)
@@ -166,6 +168,7 @@ class Runtime:
         record = ExecutionRecord(execution_id=exec_id,
                                  status=ExecutionStatus.CREATED, input=input,
                                  executable=target.name, policy=policy.to_dict(),
+                                 permissions=list(granted.granted),
                                  metadata=dict(metadata or {}))
         await self.state_store.save_execution(record)
 
@@ -236,14 +239,24 @@ class Runtime:
                 current_hash=current_hash,
             )
 
-        policy = policy or self._policies.get(execution_id) or self.default_policy
+        # Restore policy from record if not provided and not in memory
+        if policy is None:
+            policy = self._policies.get(execution_id)
+            if policy is None and record.policy:
+                policy = ExecutionPolicy.from_dict(record.policy)
+            if policy is None:
+                policy = self.default_policy
+
+        # Restore permissions from record (avoid privilege escalation on resume)
+        permissions = PermissionSet(record.permissions) if record.permissions else self.permissions
+
         context = ExecutionContext(
             execution_id=execution_id,
             input=record.input,
             state=copy.deepcopy(checkpoint.state),
             metadata=dict(record.metadata),
             policy=policy,
-            permissions=self.permissions,
+            permissions=permissions,
             step=checkpoint.step,
             model_calls=checkpoint.model_calls,
             tool_calls=checkpoint.tool_calls,
@@ -466,7 +479,8 @@ class Runtime:
         self._policies[execution_id] = context.policy
         self._running[execution_id] = context
 
-        if not await self.state_store.acquire_lock(execution_id):
+        lock_ttl = 60.0
+        if not await self.state_store.acquire_lock(execution_id, ttl=lock_ttl):
             raise ExecutionError("execution is already running elsewhere",
                                  execution_id=execution_id)
 
@@ -477,6 +491,10 @@ class Runtime:
         await context.emit(EventType.EXECUTION_STARTED, executable=target.name,
                            resumed=resumed)
         self.metrics.increment("coflowai.executions.started")
+
+        # Start lock heartbeat to prevent lease expiry on long-running executions
+        heartbeat_task = asyncio.create_task(
+            self._lock_heartbeat(execution_id, lock_ttl, context))
 
         tracer = context.services.tracer  # type: ignore[union-attr]
         result: ExecutionResult
@@ -498,10 +516,29 @@ class Runtime:
             result = await self._fail(record, context, exc, started)
 
         finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
             self._running.pop(execution_id, None)
             await self.state_store.release_lock(execution_id)
 
         return result
+
+    async def _lock_heartbeat(self, execution_id: str, ttl: float,
+                             context: ExecutionContext) -> None:
+        """Periodically extend the lock to prevent lease expiry on long executions."""
+        interval = ttl / 3
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if not await self.state_store.extend_lock(execution_id, ttl=ttl):
+                    # Lost the lock - another worker may have stolen it
+                    _log.error("lock_lost", execution_id=execution_id,
+                              message="Lock lease lost; cancelling execution")
+                    context.cancel()
+                    break
+        except asyncio.CancelledError:
+            pass
 
     async def _with_deadline(self, target: Executable,
                              context: ExecutionContext) -> ExecutionResult:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS coflowai_executions (
     output              JSONB,
     error               TEXT,
     policy              JSONB,
+    permissions         JSONB,
     metadata            JSONB,
     parent_execution_id TEXT,
     created_at          TIMESTAMPTZ NOT NULL,
@@ -142,25 +144,26 @@ class PostgresEventStore(EventStore):
 
 
 class PostgresStateStore(StateStore):
-    def __init__(self, pool: Any, *, owner: str = "worker") -> None:
+    def __init__(self, pool: Any, *, owner: str | None = None) -> None:
         self.pool = pool
-        self.owner = owner
+        self.owner = owner or uuid.uuid4().hex
 
     # ------------------------------------------------------------- executions
     async def save_execution(self, record: ExecutionRecord) -> None:
         async with self.pool.acquire() as connection:
             await connection.execute(
                 "INSERT INTO coflowai_executions (execution_id, status, executable, "
-                "workflow_hash, input, output, error, policy, metadata, "
+                "workflow_hash, input, output, error, policy, permissions, metadata, "
                 "parent_execution_id, created_at, updated_at) VALUES "
-                "($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12) "
+                "($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13) "
                 "ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, "
                 "output = EXCLUDED.output, error = EXCLUDED.error, "
                 "metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at",
                 record.execution_id, record.status.value, record.executable,
                 record.workflow_hash, _dump(record.input), _dump(record.output),
-                record.error, _dump(record.policy), _dump(record.metadata),
-                record.parent_execution_id, record.created_at, record.updated_at)
+                record.error, _dump(record.policy), _dump(record.permissions),
+                _dump(record.metadata), record.parent_execution_id, record.created_at,
+                record.updated_at)
 
     async def get_execution(self, execution_id: str) -> ExecutionRecord | None:
         async with self.pool.acquire() as connection:
@@ -226,6 +229,17 @@ class PostgresStateStore(StateStore):
                 execution_id, self.owner, now + ttl, now)
         return claimed is not None
 
+    async def extend_lock(self, execution_id: str, *, ttl: float = 60.0) -> bool:
+        """Extend the lock's TTL. Returns False if we no longer own it."""
+        now = time.time()
+        async with self.pool.acquire() as connection:
+            updated = await connection.fetchval(
+                "UPDATE coflowai_locks SET expires_at = $1 "
+                "WHERE execution_id = $2 AND owner = $3 "
+                "RETURNING execution_id",
+                now + ttl, execution_id, self.owner)
+        return updated is not None
+
     async def release_lock(self, execution_id: str) -> None:
         async with self.pool.acquire() as connection:
             await connection.execute(
@@ -256,7 +270,8 @@ def _to_record(row: Any) -> ExecutionRecord:
         execution_id=row["execution_id"], status=ExecutionStatus(row["status"]),
         input=_load(row["input"]), output=_load(row["output"]), error=row["error"],
         executable=row["executable"] or "", workflow_hash=row["workflow_hash"],
-        policy=_load(row["policy"], {}), metadata=_load(row["metadata"], {}),
+        policy=_load(row["policy"], {}), permissions=_load(row.get("permissions"), []),
+        metadata=_load(row["metadata"], {}),
         parent_execution_id=row["parent_execution_id"],
     )
     record.created_at = _as_datetime(row["created_at"])
