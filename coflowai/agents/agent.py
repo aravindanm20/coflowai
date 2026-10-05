@@ -20,7 +20,7 @@ from ..core.exceptions import (
 from ..core.executable import Executable
 from ..core.ids import stable_hash
 from ..core.result import ExecutionResult
-from ..core.types import ExecutionStatus, Message, ToolCall, ToolResult
+from ..core.types import ExecutionStatus, Message, Role, ToolCall, ToolResult
 from ..events.event import EventType
 from ..memory.base import MemoryKind
 from ..models.base import ModelRequest
@@ -31,6 +31,23 @@ from ..tools.tool import Tool
 __all__ = ["Agent"]
 
 _CONVERSATION_STATE_PREFIX = "__conversation__"
+
+
+def _pending_tool_calls(conversation: list[Message]) -> list[ToolCall]:
+    """Extract tool calls that haven't received results yet.
+
+    On resume after a crash, the conversation may contain an assistant message
+    with tool_calls but no corresponding TOOL messages. We need to replay those
+    calls with the same IDs to maintain idempotency.
+    """
+    answered: set[str] = set()
+    for msg in reversed(conversation):
+        if msg.role is Role.TOOL and msg.tool_call_id:
+            answered.add(msg.tool_call_id)
+        elif msg.role is Role.ASSISTANT and msg.tool_calls:
+            # Return calls that haven't been answered yet
+            return [call for call in msg.tool_calls if call.id not in answered]
+    return []
 
 
 class Agent(Executable):
@@ -144,6 +161,16 @@ class Agent(Executable):
         repairs_left = ctx.policy.structured_output_repair_attempts
         max_iterations = self._iteration_limit(ctx)
 
+        # Resume support: if conversation has unanswered tool calls, replay them
+        # with the same tool_call_ids to maintain idempotency across crashes
+        pending = _pending_tool_calls(conversation)
+        if pending:
+            results = await self._run_tools(ctx, pending, allowed_names)
+            for result in results:
+                conversation.append(Message.tool(
+                    result.call_id, result.name, _render_tool_result(result)))
+            self._save_conversation(ctx, conversation)
+
         try:
             async with services.tracer.span(f"agent:{self.name}", kind="agent",
                                             agent=self.name):
@@ -171,6 +198,12 @@ class Agent(Executable):
                     self._save_conversation(ctx, conversation)
 
                     if response.tool_calls:
+                        # Write-ahead checkpoint: persist tool_call_ids before execution
+                        # so resume can replay with the same IDs (stable idempotency keys)
+                        if services.runtime:
+                            await services.runtime.create_checkpoint(
+                                ctx, reason="agent_tool_calls")
+
                         results = await self._run_tools(ctx, response.tool_calls,
                                                         allowed_names)
                         for result in results:
@@ -179,6 +212,11 @@ class Agent(Executable):
                                 _render_tool_result(result),
                             ))
                         self._save_conversation(ctx, conversation)
+
+                        # Checkpoint again after tool execution completes
+                        if services.runtime:
+                            await services.runtime.create_checkpoint(
+                                ctx, reason="agent_tool_results")
                         continue
 
                     try:
@@ -245,6 +283,15 @@ class Agent(Executable):
         repairs_left = ctx.policy.structured_output_repair_attempts
         max_iterations = self._iteration_limit(ctx)
 
+        # Resume support: replay pending tool calls with same IDs
+        pending = _pending_tool_calls(conversation)
+        if pending:
+            results = await self._run_tools(ctx, pending, allowed_names)
+            for result in results:
+                conversation.append(Message.tool(
+                    result.call_id, result.name, _render_tool_result(result)))
+            self._save_conversation(ctx, conversation)
+
         for iteration in range(1, max_iterations + 1):
             ctx.next_step()
             context.step = ctx.step
@@ -275,12 +322,22 @@ class Agent(Executable):
             self._save_conversation(ctx, conversation)
 
             if response.tool_calls:
+                # Write-ahead checkpoint before executing tools
+                if services.runtime:
+                    await services.runtime.create_checkpoint(
+                        ctx, reason="agent_tool_calls")
+
                 results = await self._run_tools(ctx, response.tool_calls,
                                                 allowed_names)
                 for result in results:
                     conversation.append(Message.tool(result.call_id, result.name,
                                                      _render_tool_result(result)))
                 self._save_conversation(ctx, conversation)
+
+                # Checkpoint after tool results
+                if services.runtime:
+                    await services.runtime.create_checkpoint(
+                        ctx, reason="agent_tool_results")
                 continue
 
             try:

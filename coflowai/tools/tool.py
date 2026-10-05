@@ -121,7 +121,14 @@ class Tool:
 
 
 def build_input_model(func: Callable[..., Any], name: str) -> type[BaseModel] | None:
-    """Derive a Pydantic model (and therefore JSON schema) from type hints."""
+    """Derive a Pydantic model (and therefore JSON schema) from type hints.
+
+    Reserved parameters like 'idempotency_key' are excluded from the schema
+    since they're injected by the runtime, not provided by the model.
+    """
+    # Reserved parameters that are injected by the runtime, not the model
+    RESERVED_PARAMS = {"idempotency_key"}
+
     try:
         signature = inspect.signature(func)
         hints = inspect.get_annotations(func, eval_str=True)
@@ -131,6 +138,9 @@ def build_input_model(func: Callable[..., Any], name: str) -> type[BaseModel] | 
     fields: dict[str, tuple[Any, Any]] = {}
     for param_name, param in signature.parameters.items():
         if param_name in ("self", "cls"):
+            continue
+        if param_name in RESERVED_PARAMS:
+            # Skip reserved params - they're not shown to the model
             continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL,
                           inspect.Parameter.VAR_KEYWORD):
