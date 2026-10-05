@@ -447,15 +447,15 @@ policy = ExecutionPolicy(
 
 try:
     result = await app.run(agent, request, policy=policy)
-except BudgetExceededError as e:
+except BudgetExceeded as e:
     # Budget exhausted
     logger.warning(f"Budget exceeded: {e}")
     # Fall back to cached response or simpler model
-except ModelRateLimitError as e:
+except RateLimitError as e:
     # Rate limited
     logger.warning("Rate limited, queueing for later")
     await queue_for_retry(request)
-except ExecutionTimeoutError as e:
+except ExecutionTimeout as e:
     # Timeout
     logger.error(f"Timeout after {e.elapsed}s")
     # Check if partial results available
@@ -494,12 +494,12 @@ async def run_with_recovery(agent, request):
         await log_to_datadog(e)
         
         # Attempt recovery based on error type
-        if isinstance(e, ModelRateLimitError):
+        if isinstance(e, RateLimitError):
             # Wait and retry
             await asyncio.sleep(60)
             return await app.run(agent, request)
         
-        elif isinstance(e, BudgetExceededError):
+        elif isinstance(e, BudgetExceeded):
             # Use cheaper model
             agent.model = "gpt-4o-mini"
             return await app.run(agent, request)
@@ -677,7 +677,7 @@ async for chunk in app.stream(agent, "Write a long essay"):
     if chunk.is_final:
         # Stream complete
         result = chunk.metadata["result"]
-        print(f"\n\nCost: ${result.usage.total_cost:.4f}")
+        print(f"\n\nCost: ${result.usage.cost:.4f}")
     else:
         # Incremental output
         print(chunk.text, end="", flush=True)
@@ -709,7 +709,7 @@ policy = ExecutionPolicy(
 
 try:
     result = await app.run(agent, request, policy=policy)
-except BudgetExceededError:
+except BudgetExceeded:
     # Handle budget exhaustion
     logger.warning("Budget exceeded, using cached response")
 ```
@@ -787,8 +787,8 @@ result = await app.run(agent, request)
 logger.info(
     "execution_completed",
     execution_id=result.execution_id,
-    cost=result.usage.total_cost,
-    duration=result.usage.execution_time_seconds,
+    cost=result.usage.cost,
+    duration=result.usage.duration_ms / 1000,
 )
 ```
 
@@ -807,7 +807,7 @@ async def run_with_metrics(agent, request):
         # Success metrics
         statsd.increment("agent.execution.success")
         statsd.timing("agent.execution.duration", time.time() - start)
-        statsd.gauge("agent.execution.cost", result.usage.total_cost)
+        statsd.gauge("agent.execution.cost", result.usage.cost)
         statsd.gauge("agent.execution.tokens", result.usage.total_tokens)
         
         return result

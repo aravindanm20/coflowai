@@ -267,7 +267,7 @@ async def update_record(table: str, record_id: str, data: dict) -> dict:
     
     # Additional runtime checks
     if not context.state.get("user_authorized"):
-        raise ToolPermissionDeniedError("User not authorized")
+        raise PermissionDenied("User not authorized")
     
     # Proceed
     return await db.update(table, record_id, data)
@@ -775,7 +775,7 @@ async def run_with_metrics(agent, request):
         
         executions_total.labels(status="success", agent=agent.name).inc()
         execution_duration.labels(agent=agent.name).observe(time.time() - start)
-        execution_cost.labels(agent=agent.name).observe(result.usage.total_cost)
+        execution_cost.labels(agent=agent.name).observe(result.usage.cost)
         
         return result
     except Exception as e:
@@ -952,8 +952,8 @@ class LoggingPlugin(Plugin):
             "execution_completed",
             execution_id=execution_id,
             status=result.status,
-            cost=result.usage.total_cost,
-            duration=result.usage.execution_time_seconds
+            cost=result.usage.cost,
+            duration=result.usage.duration_ms / 1000
         )
 ```
 
@@ -965,8 +965,8 @@ class MetricsPlugin(Plugin):
     
     async def on_execution_completed(self, execution_id: str, result: ExecutionResult):
         statsd.increment("executions.completed")
-        statsd.gauge("executions.cost", result.usage.total_cost)
-        statsd.timing("executions.duration", result.usage.execution_time_seconds)
+        statsd.gauge("executions.cost", result.usage.cost)
+        statsd.timing("executions.duration", result.usage.duration_ms / 1000)
 ```
 
 ---

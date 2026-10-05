@@ -299,8 +299,8 @@ print(trace.render())
 
 ```python
 print(f"Tokens: {result.usage.total_tokens}")
-print(f"Cost: ${result.usage.total_cost:.4f}")
-print(f"Duration: {result.usage.execution_time_seconds}s")
+print(f"Cost: ${result.usage.cost:.4f}")
+print(f"Duration: {result.usage.duration_ms / 1000}s")
 print(f"Model calls: {result.usage.model_calls}")
 print(f"Tool calls: {result.usage.tool_calls}")
 ```

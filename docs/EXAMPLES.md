@@ -181,14 +181,14 @@ result = await app.run(
 ```python
 """Agent with custom retry policy."""
 from coflowai.policies import RetryPolicy, ExecutionPolicy
-from coflowai.core import ModelRateLimitError, ModelTemporaryError
+from coflowai.core import RateLimitError, ModelTemporaryError
 
 retry_policy = RetryPolicy(
     max_retries=3,
     backoff_seconds=1.0,
     backoff_multiplier=2.0,
     jitter=True,
-    retry_on=[ModelRateLimitError, ModelTemporaryError]
+    retry_on=[RateLimitError, ModelTemporaryError]
 )
 
 policy = ExecutionPolicy(
@@ -860,14 +860,14 @@ async def run_with_observability(workflow, request):
         # Success metrics
         executions_total.labels(status="success").inc()
         execution_duration.observe(time.time() - start)
-        execution_cost.observe(result.usage.total_cost)
+        execution_cost.observe(result.usage.cost)
         
         # Structured logging
         logger.info(
             "execution_completed",
             execution_id=result.execution_id,
             duration=time.time() - start,
-            cost=result.usage.total_cost,
+            cost=result.usage.cost,
         )
         
         return result

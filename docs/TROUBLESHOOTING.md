@@ -74,11 +74,11 @@ pip install "coflowai[openai]"
 
 ## Execution Errors
 
-### BudgetExceededError
+### BudgetExceeded
 
 **Problem:**
 ```
-BudgetExceededError: Maximum cost of $1.00 exceeded (spent: $1.23)
+BudgetExceeded: Maximum cost of $1.00 exceeded (spent: $1.23)
 ```
 
 **Solution:**
@@ -95,11 +95,11 @@ agent.model = "gpt-4o-mini"
 agent.max_iterations = 5
 ```
 
-### ExecutionTimeoutError
+### ExecutionTimeout
 
 **Problem:**
 ```
-ExecutionTimeoutError: Execution timed out after 120 seconds
+ExecutionTimeout: Execution timed out after 120 seconds
 ```
 
 **Solution:**
@@ -142,7 +142,7 @@ agent = Agent(
 
 **Problem:**
 ```
-ToolPermissionDeniedError: Tool 'write_file' requires permission 'filesystem.write'
+PermissionDenied: Tool 'write_file' requires permission 'filesystem.write'
 ```
 
 **Solution:**
@@ -239,7 +239,7 @@ provider = OpenAIProvider(api_key=api_key)
 
 **Problem:**
 ```
-ModelRateLimitError: Rate limit exceeded, retry after 20 seconds
+RateLimitError: Rate limit exceeded, retry after 20 seconds
 ```
 
 **Solution:**
@@ -434,8 +434,8 @@ context_builder = ContextBuilder(
 4. **Monitor and alert:**
 ```python
 result = await app.run(agent, request)
-if result.usage.total_cost > 1.0:
-    logger.warning(f"High cost: ${result.usage.total_cost:.2f}")
+if result.usage.cost > 1.0:
+    logger.warning(f"High cost: ${result.usage.cost:.2f}")
 ```
 
 ### Memory Usage

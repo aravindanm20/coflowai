@@ -186,16 +186,16 @@ result = await app.run(agent, "request")
 
 # Status
 result.succeeded                    # bool
-result.failed                       # bool
+result.status == ExecutionStatus.FAILED                       # bool
 result.status                       # ExecutionStatus
 
 # Output
 result.output                       # Agent/workflow output
 
 # Usage
-result.usage.total_cost            # float
+result.usage.cost            # float
 result.usage.total_tokens          # int
-result.usage.execution_time_seconds # float
+result.usage.duration_ms / 1000 # float
 result.usage.model_calls           # int
 result.usage.tool_calls            # int
 
@@ -351,17 +351,17 @@ coflowai worker app.py --concurrency 4
 ```python
 from coflowai.core import (
     ExecutionError,
-    ExecutionTimeoutError,
-    BudgetExceededError,
+    ExecutionTimeout,
+    BudgetExceeded,
     ModelError,
     ToolError,
 )
 
 try:
     result = await app.run(agent, "task")
-except BudgetExceededError as e:
+except BudgetExceeded as e:
     print(f"Budget exceeded: {e}")
-except ExecutionTimeoutError as e:
+except ExecutionTimeout as e:
     print(f"Timeout after {e.elapsed}s")
 except ExecutionError as e:
     print(f"Execution failed: {e}")

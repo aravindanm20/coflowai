@@ -9,6 +9,7 @@ tool to use and what to say; the runtime decides whether that is permitted,
 affordable, in time, and recoverable.
 
 ```python
+import asyncio
 from coflowai import Agent, tool
 from coflowai.testing import build_test_app
 
@@ -16,11 +17,14 @@ from coflowai.testing import build_test_app
 async def get_weather(city: str) -> dict:
     return {"city": city, "temperature": 30}
 
-app, _ = build_test_app(tools=[get_weather], permissions=["weather.read"])
-agent = Agent("assistant", "Answer the user's question.", "fake-model", [get_weather])
+async def main():
+    app, _ = build_test_app(tools=[get_weather], permissions=["weather.read"])
+    agent = Agent("assistant", "Answer the user's question.", "fake-model", [get_weather])
+    
+    result = await app.run(agent, "What's the weather in Chennai?")
+    print(result.output)
 
-result = await app.run(agent, "What's the weather in Chennai?")
-print(result.output)
+asyncio.run(main())
 ```
 
 ---
@@ -122,6 +126,7 @@ policy = ExecutionPolicy(
     mode=ExecutionMode.STRICT,   # forces temperature=0
     checkpoint_enabled=True,
 )
+# In an async function:
 result = await app.run(workflow, request, policy=policy)
 ```
 
@@ -186,6 +191,7 @@ Invalid output is repaired-and-retried, then fails loudly. It is never silently 
 ### Human approval
 
 ```python
+# In an async function:
 paused = await app.run(workflow, "release 1.4.0")
 paused.status              # ExecutionStatus.WAITING_FOR_APPROVAL
 
@@ -198,6 +204,7 @@ The execution is checkpointed and the worker is released — nothing is blocked 
 ### Resume, replay, fork
 
 ```python
+# In an async function:
 await runtime.resume(execution_id)                 # continues from the last checkpoint
 trace = await runtime.replay(execution_id)         # full step-by-step story
 await runtime.fork(execution_id, from_step=4, overrides={"model": "new-model"})
@@ -250,6 +257,7 @@ and two workers can never drive the same execution.
 service = ExecutionService(RedisJobQueue(client), runtime)
 service.register(workflow)
 
+# In an async function:
 execution_id = await service.submit(workflow, request)   # returns immediately
 
 # elsewhere, on N machines:
@@ -312,8 +320,9 @@ from coflowai.testing import build_test_app, tool_call
 
 app, model = build_test_app([tool_call("get_weather", city="Chennai"), "It is 30°C."],
                             tools=[get_weather])
-result = await app.run(agent, "weather?")
 
+# In an async function or test:
+result = await app.run(agent, "weather?")
 assert result.succeeded
 assert model.call_count == 2
 ```

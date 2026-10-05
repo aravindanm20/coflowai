@@ -69,7 +69,7 @@ async def run(
 
 **Raises:**
 - `ExecutionError` - On execution failure
-- `BudgetExceededError` - When budget limits hit
+- `BudgetExceeded` - When budget limits hit
 - `TimeoutError` - On timeout
 
 #### stream()
@@ -984,19 +984,19 @@ class UsageTracker:
 ```
 CoFlowAiError (base)
 ├── ExecutionError
-│   ├── ExecutionTimeoutError
-│   ├── BudgetExceededError
+│   ├── ExecutionTimeout
+│   ├── BudgetExceeded
 │   ├── CheckpointNotFoundError
 │   └── WorkflowCompilationError
 ├── ModelError
 │   ├── ModelNotFoundError
 │   ├── ModelInvalidRequestError
-│   ├── ModelRateLimitError
+│   ├── RateLimitError
 │   ├── ModelTemporaryError
 │   └── ModelAuthenticationError
 ├── ToolError
 │   ├── ToolNotFoundError
-│   ├── ToolPermissionDeniedError
+│   ├── PermissionDenied
 │   ├── ToolValidationError
 │   └── ToolTimeoutError
 └── StateError

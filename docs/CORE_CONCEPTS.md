@@ -399,7 +399,7 @@ policy = RetryPolicy(
     backoff_seconds=1.0,
     backoff_multiplier=2.0,
     jitter=True,
-    retry_on=[ModelRateLimitError, ModelTemporaryError],
+    retry_on=[RateLimitError, ModelTemporaryError],
     never_retry_on=[ModelInvalidRequestError],
 )
 ```
@@ -663,12 +663,12 @@ Traces mirror to OpenTelemetry for integration with:
 ```python
 usage = result.usage
 
-print(f"Execution time: {usage.execution_time_seconds}s")
+print(f"Execution time: {usage.duration_ms / 1000}s")
 print(f"Model calls: {usage.model_calls}")
 print(f"Tool calls: {usage.tool_calls}")
 print(f"Input tokens: {usage.input_tokens}")
 print(f"Output tokens: {usage.output_tokens}")
-print(f"Total cost: ${usage.total_cost:.4f}")
+print(f"Total cost: ${usage.cost:.4f}")
 
 # Per-node breakdown
 for node_id, node_usage in usage.by_node.items():
