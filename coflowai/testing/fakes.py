@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import Any, AsyncIterator, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from typing import Any
 
 from ..core.exceptions import ModelError
 from ..core.ids import tool_call_id
@@ -36,7 +37,7 @@ def tool_call(name: str, **arguments: Any) -> ToolCall:
     return ToolCall(id=tool_call_id(), name=name, arguments=arguments)
 
 
-def scripted(*responses: Scripted) -> "FakeModelProvider":
+def scripted(*responses: Scripted) -> FakeModelProvider:
     return FakeModelProvider(list(responses))
 
 

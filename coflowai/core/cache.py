@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from typing import Generic, Iterator, MutableMapping, TypeVar
+from collections.abc import Iterator, MutableMapping
+from typing import Generic, TypeVar
 
 K = TypeVar("K")
 V = TypeVar("V")

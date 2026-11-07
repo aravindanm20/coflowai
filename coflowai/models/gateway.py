@@ -7,14 +7,15 @@ timeouts, events, usage and cost accounting are impossible to bypass.
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from ..core.context import ExecutionContext
 from ..core.exceptions import ModelError, is_retryable
 from ..core.ids import model_call_id
-from ..events.event import EventType
 from ..core.retry import run_with_retry, run_with_timeout
+from ..events.event import EventType
 from .base import ModelRequest, ModelResponse
 from .registry import ModelRegistry, RegisteredModel
 from .streaming import ChunkType, StreamAccumulator, StreamChunk

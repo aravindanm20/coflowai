@@ -41,7 +41,7 @@ class RetryPolicy:
         return delay
 
     @classmethod
-    def none(cls) -> "RetryPolicy":
+    def none(cls) -> RetryPolicy:
         return cls(attempts=0)
 
 
@@ -193,7 +193,7 @@ class ExecutionPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExecutionPolicy":
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionPolicy:
         """Reconstruct policy from serialized dict."""
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**known)

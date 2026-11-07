@@ -8,7 +8,7 @@ failed by ``runtime.reject(...)``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..core.context import ExecutionContext
@@ -45,7 +45,7 @@ class ApprovalRecord:
     note: str | None = None
     payload: Any = None
     requested_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat())
+        default_factory=lambda: datetime.now(UTC).isoformat())
     decided_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -61,7 +61,7 @@ class ApprovalRecord:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ApprovalRecord":
+    def from_dict(cls, data: dict[str, Any]) -> ApprovalRecord:
         return cls(**data)
 
 

@@ -1,7 +1,7 @@
 """Regression tests for Phase 2 idempotency and checkpointing fixes."""
 
-import asyncio
 import pytest
+
 from coflowai.agents.agent import Agent
 from coflowai.core.types import ExecutionStatus
 from coflowai.runtime.runtime import Runtime
@@ -196,7 +196,8 @@ class TestIdempotencyAcrossCrash:
         """Resume should use cached result for idempotent side-effect tools."""
         runtime = Runtime(state_store=InMemoryStateStore())
         runtime.models.register("fake", FakeModelProvider([
-            [{"id": "call_1", "name": "send_email", "arguments": {"to": "test@example.com"}}],
+            [{"id": "call_1", "name": "send_email",
+              "arguments": {"to": "test@example.com"}}],
             "Email sent"
         ]))
 
@@ -228,7 +229,7 @@ class TestIdempotencyAcrossCrash:
 
         # Resume - the tool should NOT be called again (cached)
         runtime.models.register("fake", FakeModelProvider(["Resume complete"]))
-        result2 = await runtime.resume(exec_id)
+        await runtime.resume(exec_id)
 
         # Email should only have been sent once
         assert len(email_sent_count) == 1

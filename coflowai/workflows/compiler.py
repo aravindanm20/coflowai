@@ -7,7 +7,8 @@ permissions and unsupported model capabilities.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from ..core.exceptions import CompilationError
 from ..models.registry import ModelRegistry
@@ -136,16 +137,19 @@ class WorkflowCompiler:
                 self._validate_one(name, node.id, executable)
 
     def _validate_one(self, name: str, node_id: str, executable: Any) -> None:
+        registry = self.model_registry
+        if registry is None:
+            return
         requirements = executable.model_requirements
         model = getattr(executable, "model", None)
         if model:
-            if not self.model_registry.has(model):
+            if not registry.has(model):
                 raise CompilationError(
                     f"node '{node_id}' references unregistered model '{model}'",
                     workflow=name, model=model,
-                    available=sorted(m.name for m in self.model_registry.all()),
+                    available=sorted(m.name for m in registry.all()),
                 )
-            missing = self.model_registry.capabilities(model).missing(requirements)
+            missing = registry.capabilities(model).missing(requirements)
             if missing:
                 raise CompilationError(
                     f"model '{model}' lacks capabilities needed by "
@@ -154,7 +158,7 @@ class WorkflowCompiler:
                 )
         elif requirements:
             try:
-                self.model_registry.select(requirements)
+                registry.select(requirements)
             except Exception as exc:
                 raise CompilationError(
                     f"no registered model satisfies node '{node_id}'",
@@ -186,7 +190,8 @@ def _leaves(executable: Any) -> list[Any]:
 
 
 def _linear_edges(nodes: list[Node]) -> list[Edge]:
-    return [Edge(source=a.id, target=b.id) for a, b in zip(nodes, nodes[1:])]
+    pairs = zip(nodes, nodes[1:], strict=False)   # deliberately offset by one
+    return [Edge(source=a.id, target=b.id) for a, b in pairs]
 
 
 def compile_workflow(workflow, **kwargs: Any) -> ExecutionGraph:

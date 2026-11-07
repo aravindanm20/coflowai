@@ -7,7 +7,8 @@ payloads, event payloads written by the runtime, and trace attributes.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 __all__ = ["redact", "redact_mapping", "add_redaction_key", "add_redaction_pattern",
            "REDACTED"]

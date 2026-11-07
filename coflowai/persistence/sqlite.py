@@ -16,7 +16,7 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +348,6 @@ def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
         status=ExecutionStatus(row["status"]), workflow_hash=row["workflow_hash"],
         reason=row["reason"] or "auto", checkpoint_id=row["checkpoint_id"],
         created_at=datetime.fromisoformat(row["created_at"]).replace(
-            tzinfo=timezone.utc) if "+" not in row["created_at"]
+            tzinfo=UTC) if "+" not in row["created_at"]
         else datetime.fromisoformat(row["created_at"]),
     )

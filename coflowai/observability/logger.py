@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .redaction import redact_mapping
@@ -26,7 +26,7 @@ class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
+                record.created, tz=UTC
             ).isoformat(),
             "level": record.levelname,
             "event": record.getMessage(),
@@ -66,7 +66,7 @@ class StructuredLogger:
         self._logger = logging.getLogger(f"coflowai.{name}" if name else "coflowai")
         self._context = context or {}
 
-    def bind(self, **context: Any) -> "StructuredLogger":
+    def bind(self, **context: Any) -> StructuredLogger:
         merged = {**self._context, **context}
         clone = StructuredLogger.__new__(StructuredLogger)
         object.__setattr__(clone, "_logger", self._logger)

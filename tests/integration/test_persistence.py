@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from coflowai import Agent, CoFlowAi, ExecutionPolicy, ExecutionStatus, Workflow
 from coflowai.persistence.sqlite import (
     SqliteEventStore,

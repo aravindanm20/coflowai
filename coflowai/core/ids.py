@@ -67,4 +67,5 @@ def idempotency_key(execution: str, node: str | None, call: str) -> str:
 
 
 def _slug(value: str) -> str:
-    return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_").lower() or "node"
+    slug = "".join(ch if ch.isalnum() else "_" for ch in value)
+    return slug.strip("_").lower() or "node"

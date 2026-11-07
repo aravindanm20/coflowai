@@ -8,8 +8,10 @@ truncating blindly from the end.
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 from ..core.types import Message, Role
 
@@ -74,17 +76,18 @@ class ContextBuilder:
         # A deterministic extractive summariser is the default, so oversized
         # conversations degrade intelligently with no configuration.
         # Pass ``summariser=False`` to fall back to recency truncation.
-        if summariser is None:
+        if summariser is None or summariser is True:
             from .summarizer import default_summariser
             summariser = default_summariser()
-        self.summariser = summariser or None
+        self.summariser: Summariser | None = (
+            None if isinstance(summariser, bool) else summariser)
         self.min_relevance = min_relevance
         self._sections: dict[str, ContextSection] = {}
         self._order: list[str] = []
 
     # ---------------------------------------------------------------- authoring
     def add(self, name: str, messages: Iterable[Message], *, priority: int = 100,
-            order: int | None = None, relevance: float = 1.0) -> "ContextBuilder":
+            order: int | None = None, relevance: float = 1.0) -> ContextBuilder:
         section = self._sections.get(name)
         if section is None:
             section = ContextSection(name=name, priority=priority,
@@ -101,35 +104,35 @@ class ContextBuilder:
 
     def add_text(self, name: str, text: str, *, role: Role = Role.SYSTEM,
                  priority: int = 100, order: int | None = None,
-                 relevance: float = 1.0) -> "ContextBuilder":
+                 relevance: float = 1.0) -> ContextBuilder:
         if text:
             self.add(name, [Message(role, text)], priority=priority, order=order,
                      relevance=relevance)
         return self
 
-    def instructions(self, text: str) -> "ContextBuilder":
+    def instructions(self, text: str) -> ContextBuilder:
         return self.add_text("instructions", text, priority=0, order=0)
 
-    def conversation(self, messages: Iterable[Message]) -> "ContextBuilder":
+    def conversation(self, messages: Iterable[Message]) -> ContextBuilder:
         # kept longest (priority 10) but always rendered last (order 90)
         return self.add("conversation", messages, priority=10, order=90)
 
     def memory(self, items: Iterable[str], *, relevance: float = 0.6
-               ) -> "ContextBuilder":
+               ) -> ContextBuilder:
         rendered = [Message(Role.SYSTEM, f"[memory] {item}") for item in items]
         return self.add("memory", rendered, priority=70, order=20,
                         relevance=relevance)
 
     def retrieved(self, items: Iterable[str], *, relevance: float = 0.7
-                  ) -> "ContextBuilder":
+                  ) -> ContextBuilder:
         rendered = [Message(Role.SYSTEM, f"[knowledge] {item}") for item in items]
         return self.add("retrieved_context", rendered, priority=60, order=30,
                         relevance=relevance)
 
-    def tool_results(self, messages: Iterable[Message]) -> "ContextBuilder":
+    def tool_results(self, messages: Iterable[Message]) -> ContextBuilder:
         return self.add("tool_results", messages, priority=50, order=40)
 
-    def workflow_state(self, state: dict[str, Any]) -> "ContextBuilder":
+    def workflow_state(self, state: dict[str, Any]) -> ContextBuilder:
         visible = {k: v for k, v in state.items() if not k.startswith("__")}
         if visible:
             self.add_text("workflow_state",
@@ -182,22 +185,21 @@ class ContextBuilder:
 
         # Conversation: summarise the oldest turns, keep the most recent verbatim.
         if section.name == "conversation" and self.summariser is not None:
-            kept: list[Message] = []
+            recent: list[Message] = []
             tokens = 0
             for message in reversed(messages):
                 cost = message_tokens(message)
                 if tokens + cost > cap * 0.7:
                     break
-                kept.append(message)
+                recent.append(message)
                 tokens += cost
-            kept.reverse()
-            old = messages[: len(messages) - len(kept)]
+            recent.reverse()
+            old = messages[: len(messages) - len(recent)]
             if old:
-                summary = self.summariser(old, int(cap * 0.3))
-                if hasattr(summary, "__await__"):
-                    summary = await summary  # type: ignore[assignment]
-                return [Message(Role.SYSTEM, f"[summary] {summary}"), *kept]
-            return kept
+                raw = self.summariser(old, int(cap * 0.3))
+                summary = await raw if inspect.isawaitable(raw) else raw
+                return [Message(Role.SYSTEM, f"[summary] {summary}"), *recent]
+            return recent
 
         # Default: keep the most recent messages that fit.
         kept: list[Message] = []

@@ -69,7 +69,9 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-ignore = ["B008"]
+# UP042 (StrEnum) changes str() output; UP046/UP047 are optional 3.12
+# syntax; ASYNC109 flags public `timeout=` parameters.
+ignore = ["B008", "UP042", "UP046", "UP047", "ASYNC109"]
 
 [tool.mypy]
 python_version = "3.12"

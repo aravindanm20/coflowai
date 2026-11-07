@@ -8,9 +8,10 @@ application code never branches on capability.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any
 
 from ..core.types import ToolCall
 from .base import ModelResponse

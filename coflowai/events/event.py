@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..core.ids import event_id
@@ -76,7 +76,7 @@ class Event:
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
     event_id: str = field(default_factory=event_id)
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     sequence: int = 0
     step: int = 0
     node_id: str | None = None
@@ -96,7 +96,7 @@ class Event:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Event":
+    def from_dict(cls, data: dict[str, Any]) -> Event:
         return cls(
             execution_id=data["execution_id"],
             type=data["type"],

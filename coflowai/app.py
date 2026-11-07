@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable
+from typing import Any
 
 from .core.result import ExecutionResult
 from .events.store import EventStore
@@ -95,14 +96,14 @@ class CoFlowAi:
                 self.plugins.register(plugin)
 
     # ------------------------------------------------------------- lifecycle
-    async def setup(self) -> "CoFlowAi":
+    async def setup(self) -> CoFlowAi:
         await self.plugins.setup_all()
         return self
 
     async def shutdown(self) -> None:
         await self.plugins.teardown_all()
 
-    async def __aenter__(self) -> "CoFlowAi":
+    async def __aenter__(self) -> CoFlowAi:
         return await self.setup()
 
     async def __aexit__(self, *exc_info: Any) -> None:

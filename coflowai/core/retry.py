@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from .exceptions import ExecutionTimeout, is_retryable
 from ..policies.policy import RetryPolicy
+from .exceptions import ExecutionTimeout, is_retryable
 
 __all__ = ["run_with_retry", "run_with_timeout"]
 

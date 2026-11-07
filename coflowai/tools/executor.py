@@ -23,11 +23,11 @@ from ..core.exceptions import (
     is_retryable,
 )
 from ..core.ids import idempotency_key
+from ..core.retry import run_with_retry, run_with_timeout
 from ..core.types import ToolCall, ToolResult
 from ..events.event import EventType
 from ..observability.redaction import redact
 from ..policies.policy import RetryPolicy
-from ..core.retry import run_with_retry, run_with_timeout
 from .registry import ToolRegistry
 from .sandbox import InProcessSandbox, Sandbox
 
@@ -83,7 +83,7 @@ class ToolExecutor:
             return await self._finish(context, call, output, started,
                                       reservation=reservation)
 
-        except (PermissionDenied,) as exc:
+        except PermissionDenied as exc:
             await context.emit(EventType.TOOL_DENIED, tool=call.name,
                                tool_call_id=call.id, reason=str(exc))
             return self._failure(call, exc, started, context, reservation)

@@ -7,8 +7,8 @@ grants everything (intended for local development only).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 __all__ = ["PermissionSet", "Permission"]
 
@@ -40,11 +40,11 @@ class PermissionSet:
         return [r for r in required if r and not self.allows(r)]
 
     # ---------------------------------------------------------------- algebra
-    def union(self, other: "PermissionSet | Iterable[str]") -> "PermissionSet":
+    def union(self, other: PermissionSet | Iterable[str]) -> PermissionSet:
         extra = other.granted if isinstance(other, PermissionSet) else frozenset(other)
         return PermissionSet(self.granted | extra)
 
-    def intersect(self, other: "PermissionSet") -> "PermissionSet":
+    def intersect(self, other: PermissionSet) -> PermissionSet:
         """Least privilege: a child never gets more than its parent."""
         if "*" in self.granted:
             return other
@@ -62,5 +62,5 @@ class PermissionSet:
         return f"PermissionSet({sorted(self.granted)!r})"
 
     @classmethod
-    def all(cls) -> "PermissionSet":
+    def all(cls) -> PermissionSet:
         return cls({"*"})

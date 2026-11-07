@@ -8,7 +8,8 @@ timeout and error translation behave identically across providers.
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 from ..core.exceptions import (
     ConfigurationError,

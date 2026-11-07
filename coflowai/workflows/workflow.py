@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from ..approvals.approval import HumanApproval
 from ..core.context import ExecutionContext
@@ -50,7 +51,7 @@ class Workflow(Executable):
 
     # ------------------------------------------------------------- building
     def _add(self, executable: Any, kind: NodeKind,
-             name: str | None = None, **metadata: Any) -> "Workflow":
+             name: str | None = None, **metadata: Any) -> Workflow:
         node_executable = as_executable(executable)
         node_name = name or node_executable.name
         node_id = self._unique_id(node_name)
@@ -71,46 +72,46 @@ class Workflow(Executable):
             index += 1
         return f"{base}_{index}"
 
-    def start(self, executable: Any, *, name: str | None = None) -> "Workflow":
+    def start(self, executable: Any, *, name: str | None = None) -> Workflow:
         if self._nodes:
             raise WorkflowError(f"workflow '{self.name}' already has a start node")
         return self._add(executable, NodeKind.TASK, name)
 
-    def then(self, executable: Any, *, name: str | None = None) -> "Workflow":
+    def then(self, executable: Any, *, name: str | None = None) -> Workflow:
         if not self._nodes:
             return self.start(executable, name=name)
         return self._add(executable, NodeKind.TASK, name)
 
     def transform(self, func: Callable[..., Any], *,
-                  name: str | None = None) -> "Workflow":
+                  name: str | None = None) -> Workflow:
         return self._add(TransformNode(func, name=name), NodeKind.TRANSFORM, name)
 
     def parallel(self, *branches: Any, name: str = "parallel",
                  merge: Callable[[dict[str, Any]], Any] | None = None,
                  max_concurrency: int | None = None,
-                 fail_fast: bool = True) -> "Workflow":
+                 fail_fast: bool = True) -> Workflow:
         node = ParallelNode(*branches, name=name, merge=merge,
                             max_concurrency=max_concurrency, fail_fast=fail_fast)
         return self._add(node, NodeKind.PARALLEL, name,
                          branches=[b.name for b in node.branches])
 
     def route(self, condition: Callable[..., Any], routes: dict[str, Any], *,
-              name: str = "router", default: Any = None) -> "Workflow":
+              name: str = "router", default: Any = None) -> Workflow:
         node = RouterNode(condition, routes, name=name, default=default)
         return self._add(node, NodeKind.ROUTER, name, routes=sorted(routes))
 
     def loop(self, body: Any, *, until: Callable[..., Any] | None = None,
-             max_iterations: int = 3, name: str = "loop") -> "Workflow":
+             max_iterations: int = 3, name: str = "loop") -> Workflow:
         node = LoopNode(body, until=until, max_iterations=max_iterations, name=name)
         return self._add(node, NodeKind.LOOP, name, max_iterations=max_iterations)
 
     def approve(self, message: str, *, action: Any = None,
-                name: str = "approval", on_reject: str = "fail") -> "Workflow":
+                name: str = "approval", on_reject: str = "fail") -> Workflow:
         node = HumanApproval(message, action=action, name=name, on_reject=on_reject)
         return self._add(node, NodeKind.APPROVAL, name)
 
-    def subworkflow(self, workflow: "Workflow", *,
-                    name: str | None = None) -> "Workflow":
+    def subworkflow(self, workflow: Workflow, *,
+                    name: str | None = None) -> Workflow:
         return self._add(workflow, NodeKind.SUBWORKFLOW, name or workflow.name)
 
     # ------------------------------------------------------------ compilation

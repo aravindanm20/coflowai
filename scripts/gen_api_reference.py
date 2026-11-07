@@ -46,7 +46,8 @@ SECTIONS: list[tuple[str, str, list[str]]] = [
                                       "MemoryRecord", "MemoryKind"]),
     ("Events", "coflowai", ["Event", "EventStore", "InMemoryEventStore",
                             "JsonlEventStore"]),
-    ("Persistence", "coflowai.persistence.sqlite", ["SqliteEventStore", "SqliteStateStore"]),
+    ("Persistence", "coflowai.persistence.sqlite",
+     ["SqliteEventStore", "SqliteStateStore"]),
     ("Persistence", "coflowai.persistence.postgres", ["create_pool", "PostgresEventStore",
                                                       "PostgresStateStore"]),
     ("Persistence", "coflowai.persistence.redis", ["RedisEventStore", "RedisStateStore"]),
@@ -73,7 +74,8 @@ def _summary(obj: Any) -> str:
 def _ann(annotation: Any) -> str:
     if annotation is inspect.Parameter.empty:
         return ""
-    text = annotation if isinstance(annotation, str) else inspect.formatannotation(annotation)
+    text = (annotation if isinstance(annotation, str)
+            else inspect.formatannotation(annotation))
     return text.strip("'\"")
 
 

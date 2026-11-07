@@ -47,7 +47,7 @@ class Job:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Job":
+    def from_dict(cls, data: dict[str, Any]) -> Job:
         return cls(**data)
 
 

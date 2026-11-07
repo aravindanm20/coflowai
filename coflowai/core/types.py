@@ -75,20 +75,20 @@ class Message:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def system(cls, content: str) -> "Message":
+    def system(cls, content: str) -> Message:
         return cls(Role.SYSTEM, content)
 
     @classmethod
-    def user(cls, content: str) -> "Message":
+    def user(cls, content: str) -> Message:
         return cls(Role.USER, content)
 
     @classmethod
     def assistant(cls, content: str | None = None,
-                  tool_calls: list[ToolCall] | None = None) -> "Message":
+                  tool_calls: list[ToolCall] | None = None) -> Message:
         return cls(Role.ASSISTANT, content, tool_calls=list(tool_calls or []))
 
     @classmethod
-    def tool(cls, call_id: str, name: str, content: str) -> "Message":
+    def tool(cls, call_id: str, name: str, content: str) -> Message:
         return cls(Role.TOOL, content, tool_call_id=call_id, name=name)
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,7 +101,7 @@ class Message:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Message":
+    def from_dict(cls, data: dict[str, Any]) -> Message:
         return cls(
             role=Role(data["role"]),
             content=data.get("content"),
@@ -204,7 +204,7 @@ class Usage:
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
-    def add(self, other: "Usage") -> "Usage":
+    def add(self, other: Usage) -> Usage:
         self.model_calls += other.model_calls
         self.tool_calls += other.tool_calls
         self.input_tokens += other.input_tokens

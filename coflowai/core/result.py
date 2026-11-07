@@ -38,7 +38,7 @@ class ExecutionResult:
         return self.status in (ExecutionStatus.WAITING,
                                ExecutionStatus.WAITING_FOR_APPROVAL)
 
-    def raise_for_status(self) -> "ExecutionResult":
+    def raise_for_status(self) -> ExecutionResult:
         """Convert a failed result into an exception (opt-in)."""
         if self.succeeded:
             return self

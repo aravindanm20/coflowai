@@ -49,7 +49,7 @@ class ReplayTrace:
     steps: list[ReplayStep] = field(default_factory=list)
 
     @classmethod
-    def from_events(cls, execution_id: str, events: list[Event]) -> "ReplayTrace":
+    def from_events(cls, execution_id: str, events: list[Event]) -> ReplayTrace:
         trace = cls(execution_id=execution_id, events=list(events))
         current: ReplayStep | None = None
         index = 0

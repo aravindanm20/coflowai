@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..core.ids import new_id
@@ -27,7 +27,7 @@ class Checkpoint:
     workflow_hash: str | None = None
     reason: str = "auto"
     checkpoint_id: str = field(default_factory=lambda: new_id("ckpt"))
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def tokens_used(self) -> int:
@@ -68,13 +68,13 @@ class ExecutionRecord:
     permissions: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_execution_id: str | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def touch(self, status: ExecutionStatus | None = None) -> None:
         if status is not None:
             self.status = status
-        self.updated_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {

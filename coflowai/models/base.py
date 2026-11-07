@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from ..core.types import Message, ToolCall
 
@@ -131,7 +132,7 @@ class ModelProvider(ABC):
     async def generate(self, request: ModelRequest) -> ModelResponse:
         ...
 
-    async def stream(self, request: ModelRequest) -> AsyncIterator["StreamChunk"]:
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamChunk]:
         """Incremental generation.
 
         The default implementation emulates a stream from :meth:`generate`, so

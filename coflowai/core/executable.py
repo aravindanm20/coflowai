@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .context import ExecutionContext
 from .ids import stable_hash
@@ -63,7 +64,7 @@ class FunctionExecutable(Executable):
     def __init__(self, func: Callable[..., Any | Awaitable[Any]],
                  name: str | None = None) -> None:
         self.func = func
-        self.name = name or getattr(func, "__name__", "function")
+        self.name = name or str(getattr(func, "__name__", "function"))
 
     async def execute(self, context: ExecutionContext) -> ExecutionResult:
         import inspect

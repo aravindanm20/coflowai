@@ -8,14 +8,16 @@ core never requires it.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 from .redaction import redact_mapping
 
 __all__ = ["Span", "Tracer", "render_trace"]
 
+_OTEL_TRACER: Any
 try:  # pragma: no cover - optional dependency
     from opentelemetry import trace as _otel_trace
 
@@ -29,7 +31,7 @@ class Span:
     name: str
     kind: str = "internal"          # execution | workflow | agent | model | tool
     attributes: dict[str, Any] = field(default_factory=dict)
-    children: list["Span"] = field(default_factory=list)
+    children: list[Span] = field(default_factory=list)
     start: float = field(default_factory=time.perf_counter)
     end: float | None = None
     error: str | None = None
@@ -48,7 +50,7 @@ class Span:
             "children": [c.to_dict() for c in self.children],
         }
 
-    def walk(self) -> Iterator["Span"]:
+    def walk(self) -> Iterator[Span]:
         yield self
         for child in self.children:
             yield from child.walk()

@@ -6,7 +6,7 @@ authorised to call.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from ..core.exceptions import ToolNotFound
 from ..policies.permissions import PermissionSet
@@ -63,7 +63,7 @@ class ToolRegistry:
             and permissions.allows(tool.permission)
         ]
 
-    def scoped(self, names: Iterable[str]) -> "ToolRegistry":
+    def scoped(self, names: Iterable[str]) -> ToolRegistry:
         registry = ToolRegistry()
         for name in names:
             registry.register(self.get(name))

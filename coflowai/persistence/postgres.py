@@ -155,7 +155,8 @@ class PostgresStateStore(StateStore):
                 "INSERT INTO coflowai_executions (execution_id, status, executable, "
                 "workflow_hash, input, output, error, policy, permissions, metadata, "
                 "parent_execution_id, created_at, updated_at) VALUES "
-                "($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12,$13) "
+                "($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8::jsonb,$9::jsonb,"
+                "$10,$11,$12,$13) "
                 "ON CONFLICT (execution_id) DO UPDATE SET status = EXCLUDED.status, "
                 "output = EXCLUDED.output, error = EXCLUDED.error, "
                 "metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at",

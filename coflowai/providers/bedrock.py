@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from ..core.exceptions import ConfigurationError, ModelError, ModelUnavailable
-from ..core.exceptions import RateLimitError
+from ..core.exceptions import (
+    ConfigurationError,
+    ModelError,
+    ModelUnavailable,
+    RateLimitError,
+)
 from ..core.ids import tool_call_id
 from ..core.types import Message, Role, ToolCall
 from ..models.base import (

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from ..core.exceptions import ConfigurationError, ExecutionError
 from ..core.executable import Executable
@@ -222,7 +223,7 @@ class WorkerPool:
                 await task
         self._tasks.clear()
 
-    async def __aenter__(self) -> "WorkerPool":
+    async def __aenter__(self) -> WorkerPool:
         await self.start()
         return self
 

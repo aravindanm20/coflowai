@@ -1,14 +1,16 @@
 """Regression tests for Phase 1 critical correctness fixes."""
 
 import asyncio
+
 import pytest
+
 from coflowai.agents.agent import Agent
 from coflowai.core.types import ExecutionStatus
 from coflowai.distributed.queue import InMemoryJobQueue, Job
 from coflowai.distributed.worker import ExecutableRegistry, Worker
 from coflowai.persistence.sqlite import SqliteStateStore
 from coflowai.policies.permissions import PermissionSet
-from coflowai.policies.policy import ExecutionPolicy, ExecutionMode
+from coflowai.policies.policy import ExecutionMode, ExecutionPolicy
 from coflowai.runtime.runtime import Runtime
 from coflowai.state.store import InMemoryStateStore
 from coflowai.testing.fakes import FakeModelProvider

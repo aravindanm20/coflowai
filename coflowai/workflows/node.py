@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
-from ..core.context import ExecutionContext
-from ..core.exceptions import (BudgetExceeded, ExecutionCancelled,
-                               ExecutionTimeout, MaxStepsExceeded, WorkflowError)
 from ..approvals.approval import ApprovalRequired
+from ..core.context import ExecutionContext
+from ..core.exceptions import (
+    BudgetExceeded,
+    ExecutionCancelled,
+    ExecutionTimeout,
+    MaxStepsExceeded,
+    WorkflowError,
+)
 from ..core.executable import Executable, as_executable
 from ..core.ids import stable_hash
 from ..core.result import ExecutionResult
@@ -23,8 +29,8 @@ _CONTROL_FLOW: tuple[type[BaseException], ...] = (
     MaxStepsExceeded, asyncio.CancelledError)
 #: State key prefix for the per-branch completion ledger of ParallelNode.
 PARALLEL_PROGRESS_KEY = "__parallel_progress__"
-__all__ = ["PARALLEL_PROGRESS_KEY", "NodeKind", "Node", "SequenceNode", "ParallelNode", "RouterNode",
-           "LoopNode", "TransformNode"]
+__all__ = ["PARALLEL_PROGRESS_KEY", "NodeKind", "Node", "SequenceNode",
+           "ParallelNode", "RouterNode", "LoopNode", "TransformNode"]
 
 
 class NodeKind(str, Enum):
@@ -182,7 +188,7 @@ class ParallelNode(Executable):
             pairs = []
             gathered = await asyncio.gather(*(run(b) for b in self.branches),
                                             return_exceptions=True)
-            for branch, item in zip(self.branches, gathered):
+            for branch, item in zip(self.branches, gathered, strict=True):
                 if isinstance(item, BaseException):
                     failures[branch.name] = item
                 else:
@@ -337,7 +343,7 @@ class TransformNode(Executable):
 
     def __init__(self, func: Callable[..., Any], name: str | None = None) -> None:
         self.func = func
-        self.name = name or getattr(func, "__name__", "transform")
+        self.name = name or str(getattr(func, "__name__", "transform"))
 
     async def execute(self, context: ExecutionContext) -> ExecutionResult:
         context.ensure_alive()

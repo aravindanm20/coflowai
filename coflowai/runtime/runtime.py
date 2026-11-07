@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import copy
 import time
-from typing import Any, AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable
+from datetime import UTC
+from typing import Any
 
 from ..approvals.approval import APPROVALS_STATE_KEY, ApprovalRecord, ApprovalRequired
 from ..core.cache import BoundedCache
@@ -59,7 +61,7 @@ _log = get_logger("runtime")
 class Runtime:
     """Creates executions, enforces policy, persists everything important."""
 
-    _default: "Runtime | None" = None
+    _default: Runtime | None = None
 
     def __init__(self, *,
                  event_store: EventStore | None = None,
@@ -110,7 +112,7 @@ class Runtime:
 
     # ------------------------------------------------------------- factories
     @classmethod
-    def default(cls) -> "Runtime":
+    def default(cls) -> Runtime:
         if cls._default is None:
             cls._default = cls()
         return cls._default
@@ -266,7 +268,8 @@ class Runtime:
                 policy = self.default_policy
 
         # Restore permissions from record (avoid privilege escalation on resume)
-        permissions = PermissionSet(record.permissions) if record.permissions else self.permissions
+        permissions = (PermissionSet(record.permissions) if record.permissions
+                       else self.permissions)
 
         context = ExecutionContext(
             execution_id=execution_id,
@@ -714,9 +717,9 @@ def _event(execution_id: str, event_type: str, *, step: int = 0, **payload: Any)
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _rebind_instructions(target: Executable, instructions: str) -> Executable:
@@ -725,16 +728,16 @@ def _rebind_instructions(target: Executable, instructions: str) -> Executable:
     from ..workflows.workflow import Workflow
 
     if isinstance(target, Agent):
-        clone = copy.copy(target)
-        clone.instructions = instructions
-        return clone
+        agent_copy = copy.copy(target)
+        agent_copy.instructions = instructions
+        return agent_copy
     if isinstance(target, Workflow):
-        clone = copy.copy(target)
-        clone._nodes = [copy.copy(node) for node in target._nodes]
-        for node in clone._nodes:
+        workflow_copy = copy.copy(target)
+        workflow_copy._nodes = [copy.copy(node) for node in target._nodes]
+        for node in workflow_copy._nodes:
             node.executable = _rebind_instructions(node.executable, instructions)
-        clone._graph = None
-        return clone
+        workflow_copy._graph = None
+        return workflow_copy
     return target
 
 
@@ -744,14 +747,14 @@ def _rebind_model(target: Executable, model: str) -> Executable:
     from ..workflows.workflow import Workflow
 
     if isinstance(target, Agent):
-        clone = copy.copy(target)
-        clone.model = model
-        return clone
+        agent_copy = copy.copy(target)
+        agent_copy.model = model
+        return agent_copy
     if isinstance(target, Workflow):
-        clone = copy.copy(target)
-        clone._nodes = [copy.copy(node) for node in target._nodes]
-        for node in clone._nodes:
+        workflow_copy = copy.copy(target)
+        workflow_copy._nodes = [copy.copy(node) for node in target._nodes]
+        for node in workflow_copy._nodes:
             node.executable = _rebind_model(node.executable, model)
-        clone._graph = None
-        return clone
+        workflow_copy._graph = None
+        return workflow_copy
     return target

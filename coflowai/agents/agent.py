@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
+from typing import Any
 
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -13,7 +14,6 @@ from ..context.builder import ContextBudget, ContextBuilder
 from ..core.context import ExecutionContext
 from ..core.exceptions import (
     ConfigurationError,
-    MaxStepsExceeded,
     MaxStepsExceeded,
     ValidationError,
 )
@@ -354,7 +354,7 @@ class Agent(Executable):
             context.merge_from(ctx)
             await ctx.emit(EventType.AGENT_COMPLETED, agent=self.name,
                            iterations=iteration, streaming=True)
-            result = ExecutionResult(
+            final = ExecutionResult(
                 execution_id=ctx.execution_id,
                 status=ExecutionStatus.COMPLETED,
                 output=output,
@@ -362,7 +362,7 @@ class Agent(Executable):
                 messages=list(conversation),
                 metadata={"agent": self.name, "iterations": iteration},
             )
-            yield StreamChunk(type=ChunkType.DONE, metadata={"result": result})
+            yield StreamChunk(type=ChunkType.DONE, metadata={"result": final})
             return
 
         context.merge_from(ctx)
@@ -413,7 +413,11 @@ class Agent(Executable):
     # ------------------------------------------------------------- tool loop
     async def _run_tools(self, ctx: ExecutionContext, calls: list[ToolCall],
                          allowed: set[str]) -> list[ToolResult]:
-        executor = ctx.services.tool_executor
+        services = ctx.services
+        if services is None:
+            raise ConfigurationError(
+                "agent tools need runtime services; run the agent via app.run()")
+        executor = services.tool_executor
         limit = max(1, ctx.policy.max_concurrency)
 
         # STRICT mode serialises tool calls so ordering is reproducible.
@@ -521,4 +525,4 @@ def _extract_json(text: str) -> Any:
             except json.JSONDecodeError as exc:
                 raise ValidationError("model output is not valid JSON",
                                       cause=exc) from exc
-        raise ValidationError("model output is not valid JSON")
+        raise ValidationError("model output is not valid JSON") from None

@@ -50,7 +50,7 @@ class UsageLedger:
     reserved_tool_calls: int = 0
 
     @classmethod
-    def from_context(cls, context: "ExecutionContext") -> "UsageLedger":
+    def from_context(cls, context: ExecutionContext) -> UsageLedger:
         return cls(model_calls=context.model_calls, tool_calls=context.tool_calls,
                    tokens=context.total_tokens, cost=context.cost)
 
@@ -68,25 +68,26 @@ class Reservation:
             self.active = False
             return
         self.active = False
+        ledger = self.ledger
         if self.kind == "model":
-            self.ledger.reserved_model_calls = max(0, self.ledger.reserved_model_calls - 1)
+            ledger.reserved_model_calls = max(0, ledger.reserved_model_calls - 1)
         else:
-            self.ledger.reserved_tool_calls = max(0, self.ledger.reserved_tool_calls - 1)
+            ledger.reserved_tool_calls = max(0, ledger.reserved_tool_calls - 1)
 
 
 @dataclass(slots=True)
 class RuntimeServices:
     """Infrastructure handles shared by every context in one execution."""
 
-    publisher: "EventPublisher"
-    state_store: "StateStore"
-    models: "ModelRegistry"
-    tools: "ToolRegistry"
+    publisher: EventPublisher
+    state_store: StateStore
+    models: ModelRegistry
+    tools: ToolRegistry
     gateway: Any               # ModelGateway
     tool_executor: Any         # ToolExecutor
-    tracer: "Tracer"
-    metrics: "MetricsSink"
-    usage: "UsageTracker"
+    tracer: Tracer
+    metrics: MetricsSink
+    usage: UsageTracker
     memory: Any = None
     runtime: Any = None
     approvals: Any = None
@@ -165,7 +166,7 @@ class ExecutionContext:
     def child(self, *, input: Any = None, node_id: str | None = None,
               agent_name: str | None = None,
               permissions: PermissionSet | None = None,
-              state: dict[str, Any] | None = None) -> "ExecutionContext":
+              state: dict[str, Any] | None = None) -> ExecutionContext:
         """Create a scoped view that shares counters through ``merge_from``.
 
         Children get their own ``input``/``node_id`` but the *same* budget
@@ -236,7 +237,7 @@ class ExecutionContext:
                 reservation.release()
             self._ledger.tool_calls += 1
 
-    def merge_from(self, child: "ExecutionContext") -> None:
+    def merge_from(self, child: ExecutionContext) -> None:
         """Fold a child's consumption back into this context."""
         # counters are absolute in children, so the maximum is the true total
         self.step = max(self.step, child.step)
@@ -248,7 +249,7 @@ class ExecutionContext:
         self.cost = max(self.cost, child.cost)
         self.merge_durable_state(child)
 
-    def merge_durable_state(self, child: "ExecutionContext") -> None:
+    def merge_durable_state(self, child: ExecutionContext) -> None:
         """Propagate framework-owned state (``__``-prefixed keys) to this scope.
 
         Children work on a deep copy of state, so ledgers written inside a node
@@ -267,8 +268,8 @@ class ExecutionContext:
             else:
                 self.state[key] = value
 
-    def absorb_parallel(self, children: list["ExecutionContext"],
-                        baseline: "ExecutionContext") -> None:
+    def absorb_parallel(self, children: list[ExecutionContext],
+                        baseline: ExecutionContext) -> None:
         """Merge sibling contexts that ran concurrently (sum of deltas)."""
         for child in children:
             self.model_calls += child.model_calls - baseline.model_calls

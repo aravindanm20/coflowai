@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, ValidationError as PydanticValidationError
-from pydantic import create_model
+from pydantic import BaseModel, create_model
+from pydantic import ValidationError as PydanticValidationError
 
 from ..core.exceptions import ValidationError
 
@@ -135,7 +136,7 @@ def build_input_model(func: Callable[..., Any], name: str) -> type[BaseModel] | 
     except Exception:  # pragma: no cover - exotic callables
         return None
 
-    fields: dict[str, tuple[Any, Any]] = {}
+    fields: dict[str, Any] = {}
     for param_name, param in signature.parameters.items():
         if param_name in ("self", "cls"):
             continue

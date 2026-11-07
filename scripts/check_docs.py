@@ -46,7 +46,8 @@ def _accepts(fn: Any, kwargs: list[str], npos: int) -> str | None:
              if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
     for kw in kwargs:
         if kw not in names and not var_kw:
-            return f"unexpected keyword '{kw}' (accepts: {', '.join(sorted(names)) or 'none'})"
+            accepted = ", ".join(sorted(names)) or "none"
+            return f"unexpected keyword '{kw}' (accepts: {accepted})"
     positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY,
                                                    p.POSITIONAL_OR_KEYWORD)]
     if npos > len(positional) and not any(p.kind is p.VAR_POSITIONAL for p in params):
