@@ -50,6 +50,12 @@ class UsageTracker:
         if tool:
             self.by_tool[tool].add(_copy(usage))
 
+    def __getattr__(self, item: str) -> Any:
+        """Shorthand: ``tracker.model_calls`` == ``tracker.total.model_calls``."""
+        if item in ("model_calls", "tool_calls", "input_tokens", "output_tokens",
+                    "cached_tokens", "cost", "total_tokens"):
+            return getattr(self.total, item)
+        raise AttributeError(item)
     def to_dict(self) -> dict[str, Any]:
         return {
             "total": self.total.to_dict(),

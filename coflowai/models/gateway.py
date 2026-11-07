@@ -35,11 +35,19 @@ class ModelGateway:
                    model: str | None = None,
                    requirements: dict[str, bool] | None = None,
                    prefer: str = "priority") -> ModelResponse:
-        await context.check_model_budget()
-
+        reservation = await context.check_model_budget()
+        try:
+            return await self._call(context, request, model=model,
+                                    requirements=requirements, prefer=prefer,
+                                    reservation=reservation)
+        finally:
+            reservation.release()       # no-op if usage was already recorded
+    async def _call(self, context: ExecutionContext, request: ModelRequest, *,
+                    model: str | None, requirements: dict[str, bool] | None,
+                    prefer: str, reservation: Any) -> ModelResponse:
         override = self._override_for(context)
         if override is not None:
-            return await self._apply_override(context, override)
+            return await self._apply_override(context, override, reservation)
 
         registered = self.registry.resolve(model=model, requirements=requirements,
                                            prefer=prefer)
@@ -69,7 +77,8 @@ class ModelGateway:
         for candidate in chain:
             request.model = candidate.name
             try:
-                return await self._call_one(context, candidate, request, call_id)
+                return await self._call_one(context, candidate, request, call_id,
+                                            reservation)
             except Exception as exc:  # try the next provider only for transient faults
                 last_error = exc
                 if not is_retryable(exc) or candidate is chain[-1]:
@@ -93,7 +102,7 @@ class ModelGateway:
             or overrides.get(context.model_calls + 1)
 
     async def _apply_override(self, context: ExecutionContext,
-                              override: Any) -> ModelResponse:
+                              override: Any, reservation: Any = None) -> ModelResponse:
         """Substitute a recorded/edited response without calling a provider.
 
         Usage is still counted (the call *happened* from the execution's point
@@ -109,7 +118,7 @@ class ModelGateway:
             response = ModelResponse(text=str(override), finish_reason="stop")
         response.cost = 0.0
         response.model = response.model or "override"
-        context.model_calls += 1
+        context.record_model_usage(reservation=reservation)
         await context.emit(EventType.MODEL_COMPLETED, model="override",
                            agent=context.agent_name, overridden=True,
                            response=response.to_dict())
@@ -127,7 +136,17 @@ class ModelGateway:
         policy engine.  Streaming is not retried mid-flight: once bytes have
         been delivered to the caller, a silent restart would duplicate output.
         """
-        await context.check_model_budget()
+        reservation = await context.check_model_budget()
+        try:
+            async for chunk in self._stream(context, request, model=model,
+                                            requirements=requirements,
+                                            prefer=prefer, reservation=reservation):
+                yield chunk
+        finally:
+            reservation.release()
+    async def _stream(self, context: ExecutionContext, request: ModelRequest, *,
+                      model: str | None, requirements: dict[str, bool] | None,
+                      prefer: str, reservation: Any) -> AsyncIterator[StreamChunk]:
         registered = self.registry.resolve(model=model, requirements=requirements,
                                            prefer=prefer)
         call_id = model_call_id()
@@ -180,7 +199,7 @@ class ModelGateway:
         else:
             response = accumulator.build(model=registered.name)
         latency_ms = (time.perf_counter() - started) * 1000
-        self._account(context, registered, response, latency_ms)
+        self._account(context, registered, response, latency_ms, reservation)
         await context.maybe_warn_budget()
         await context.emit(
             EventType.MODEL_COMPLETED, model=registered.name, model_call_id=call_id,
@@ -191,7 +210,8 @@ class ModelGateway:
 
     # ------------------------------------------------------------------ inner
     async def _call_one(self, context: ExecutionContext, registered: RegisteredModel,
-                        request: ModelRequest, call_id: str) -> ModelResponse:
+                        request: ModelRequest, call_id: str,
+                        reservation: Any = None) -> ModelResponse:
         started = time.perf_counter()
 
         async def attempt(attempt_number: int) -> ModelResponse:
@@ -236,9 +256,8 @@ class ModelGateway:
             raise
 
         latency_ms = (time.perf_counter() - started) * 1000
-        self._account(context, registered, response, latency_ms)
+        self._account(context, registered, response, latency_ms, reservation)
         await context.maybe_warn_budget()
-
         await context.emit(
             EventType.MODEL_COMPLETED,
             model=registered.name,
@@ -250,7 +269,8 @@ class ModelGateway:
         return response
 
     def _account(self, context: ExecutionContext, registered: RegisteredModel,
-                 response: ModelResponse, latency_ms: float) -> None:
+                 response: ModelResponse, latency_ms: float,
+                 reservation: Any = None) -> None:
         cost = response.cost
         if cost is None:
             cost = registered.pricing.estimate(
@@ -259,11 +279,10 @@ class ModelGateway:
             response.cost = cost
         response.model = response.model or registered.name
 
-        context.model_calls += 1
-        context.input_tokens += response.input_tokens
-        context.output_tokens += response.output_tokens
-        context.cached_tokens += response.cached_tokens
-        context.cost += cost
+        context.record_model_usage(input_tokens=response.input_tokens,
+                                   output_tokens=response.output_tokens,
+                                   cached_tokens=response.cached_tokens,
+                                   cost=cost, reservation=reservation)
 
         if context.services is None:
             return

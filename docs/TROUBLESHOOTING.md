@@ -58,8 +58,8 @@ pip install "coflowai[all]"
 ### Import Errors
 
 **Problem:**
-```python
-from coflowai.providers.openai import OpenAIProvider
+```text
+>>> from coflowai.providers.openai import OpenAIProvider
 ImportError: cannot import name 'OpenAIProvider'
 ```
 
@@ -109,8 +109,8 @@ Increase timeout or optimize workflow:
 # Increase timeout
 policy = ExecutionPolicy(timeout_seconds=600)
 
-# Or add agent-level timeout
-agent = Agent(..., timeout_seconds=60)
+# Or bound each model call (agents have no separate timeout)
+policy = ExecutionPolicy(timeout_seconds=600, model_timeout_seconds=90)
 
 # Or optimize expensive operations
 ```
@@ -232,7 +232,7 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY not set")
 
-provider = OpenAIProvider(api_key=api_key)
+provider = OpenAIProvider(model="gpt-4o", api_key=api_key)
 ```
 
 ### Rate Limit Error
@@ -249,13 +249,14 @@ Configure retry policy:
 from coflowai.policies import RetryPolicy
 
 retry_policy = RetryPolicy(
-    max_retries=5,
-    backoff_seconds=2.0,
-    backoff_multiplier=2.0,
+    attempts=3,              # total tries per model/tool call
+    backoff="exponential",   # or "linear" / "fixed"
+    base_delay=1.0,          # seconds
+    max_delay=30.0,
     jitter=True,
 )
 
-policy = ExecutionPolicy(retry_policy=retry_policy)
+policy = ExecutionPolicy(retry=retry_policy)
 ```
 
 Or implement rate limiting in application:
@@ -304,7 +305,7 @@ Register the model first:
 print(app.models.list())
 
 # Register missing model
-app.models.register("gpt-4o", provider=provider, ...)
+app.models.register("gpt-4o", provider=provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 # Or use existing model
 agent.model = "gpt-4o"
@@ -343,10 +344,8 @@ httpx.ConnectTimeout: Connection timeout after 30 seconds
 Increase provider timeout:
 
 ```python
-provider = OpenAIProvider(
-    api_key="...",
-    timeout=120  # Increase from default 60
-)
+# Model-call timeouts are a policy setting (default 60s), not a provider option
+policy = ExecutionPolicy(model_timeout_seconds=120)
 ```
 
 ---
@@ -536,21 +535,25 @@ pytest tests -m "not integration"
 
 **Problem:**
 ```
-StateLockError: Could not acquire lock for execution_123
+ExecutionError: execution is already running elsewhere
 ```
 
-**Solution:**
-Increase lock lease duration or reduce concurrency:
+**Cause:** another worker holds the execution's lease. Leases are renewed by a
+heartbeat every `lock_ttl_seconds / 3`, so a *live* worker never loses its
+lease; a *crashed* worker's lease expires after `lock_ttl_seconds`.
+
+**Solution:** wait for the lease to expire (or the other run to finish). If
+crashed workers block takeovers for too long, shorten the lease:
 
 ```python
-state_store = PostgresStateStore(
-    dsn="...",
-    lock_lease_seconds=600  # Increase from 300
-)
+from coflowai import Runtime
 
-# Or reduce worker concurrency
-worker = Worker(service=service, concurrency=2)
+runtime = Runtime(state_store=state_store, lock_ttl_seconds=30)
 ```
+
+Make sure each worker process uses a distinct `owner` on its state store
+(`PostgresStateStore(pool, owner="worker-1")`), otherwise two processes look
+like the same lock holder.
 
 ### Job Redelivery
 
@@ -571,10 +574,13 @@ queue = RedisJobQueue(
 This is expected (at-least-once delivery). Ensure idempotency:
 
 ```python
-@tool(side_effect=True, idempotent=True)  # Safe to retry
-async def charge_payment(...):
-    # Idempotency key automatically provided
-    ...
+@tool(side_effect=True, idempotent=True, permission="payments.write")
+async def charge_payment(customer_id: str, amount_cents: int,
+                         idempotency_key: str) -> dict:
+    # The runtime injects a stable key (execution + node + tool call id) and
+    # caches the result, so redelivery/resume never charges twice.
+    return await payments.charge(customer_id, amount_cents,
+                                 idempotency_key=idempotency_key)
 ```
 
 ### Worker Crashes
@@ -599,8 +605,8 @@ logger.error("worker_crashed", error=str(e))
 ```python
 async def safe_worker():
     try:
-        worker = Worker(service=service)
-        await worker.run()
+        worker = Worker(app.runtime, queue, service.executables)
+        await worker.run_forever()
     except Exception as e:
         logger.error("worker_error", error=str(e))
         # Optionally restart
@@ -611,7 +617,7 @@ async def safe_worker():
 # Health check endpoint
 @app.get("/worker/health")
 async def worker_health():
-    return {"status": "healthy", "concurrency": worker.concurrency}
+    return {"status": "healthy", "processed": worker.processed}
 ```
 
 3. **Use process supervisor:**
@@ -634,17 +640,18 @@ asyncpg.exceptions.TooManyConnectionsError: Cannot acquire connection
 Increase connection pool size:
 
 ```python
-state_store = PostgresStateStore(
-    dsn="...",
-    min_pool_size=5,
-    max_pool_size=20  # Increase
-)
+from coflowai.persistence.postgres import create_pool
+
+# extra keyword arguments are passed to asyncpg.create_pool
+pool = await create_pool("postgresql://...", min_size=5, max_size=20)
+state_store = PostgresStateStore(pool, owner="worker-1")
+event_store = PostgresEventStore(pool)
 ```
 
 Or reduce worker concurrency:
 
 ```python
-worker = Worker(service=service, concurrency=2)  # Fewer concurrent jobs
+pool = WorkerPool(app.runtime, queue, service.executables, size=2)  # fewer concurrent jobs
 ```
 
 ---
@@ -674,12 +681,12 @@ structlog.configure(
 
 ```python
 # Get all events
-events = await app.events.get_events(execution_id)
+events = await app.event_store.get_events(execution_id)
 
 for event in events:
     print(f"{event.timestamp}: {event.type}")
     if event.type.endswith("failed"):
-        print(f"  Error: {event.data}")
+        print(f"  Error: {event.payload}")
 ```
 
 ### Replay Execution

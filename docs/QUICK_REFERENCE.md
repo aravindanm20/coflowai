@@ -45,7 +45,7 @@ agent = Agent(
     output_schema=Report,
     max_iterations=10,
     temperature=0.7,
-    timeout_seconds=60,
+    max_output_tokens=2000,
     model_requirements={"tool_calling": True},
 )
 ```
@@ -146,8 +146,8 @@ from coflowai.providers.openai import OpenAIProvider
 app = CoFlowAi()
 
 # Register provider
-provider = OpenAIProvider(api_key="sk-...")
-app.models.register("gpt-4o", provider=provider, ...)
+provider = OpenAIProvider(model="gpt-4o", api_key="sk-...")
+app.models.register("gpt-4o", provider=provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 # Run
 result = await app.run(agent, "request", policy=policy)
@@ -167,7 +167,7 @@ async for chunk in app.stream(agent, "Explain"):
     print(chunk.text, end="")
 
 # Resume
-await app.resume(execution_id, workflow)
+await app.resume(execution_id, executable=workflow)
 
 # Approve
 await app.approve(execution_id, by="alice", executable=workflow)
@@ -176,7 +176,8 @@ await app.approve(execution_id, by="alice", executable=workflow)
 trace = await app.replay(execution_id)
 
 # Fork
-await app.fork(execution_id, workflow, from_step=4)
+await app.fork(execution_id, from_step=4, executable=workflow,
+               overrides={"model_responses": {"3": "a different answer"}})
 ```
 
 ## Result
@@ -236,27 +237,29 @@ assert model.call_count == 2
 ```python
 # OpenAI
 from coflowai.providers.openai import OpenAIProvider
-provider = OpenAIProvider(api_key="sk-...")
+provider = OpenAIProvider(model="gpt-4o", api_key="sk-...")
 
 # Anthropic
 from coflowai.providers.anthropic import AnthropicProvider
-provider = AnthropicProvider(api_key="sk-ant-...")
+provider = AnthropicProvider(model="claude-sonnet-4", api_key="sk-ant-...")
 
 # Azure OpenAI
 from coflowai.providers.openai import AzureOpenAIProvider
 provider = AzureOpenAIProvider(
-    api_key="...",
     endpoint="https://your-resource.openai.azure.com",
-    api_version="2024-02-15-preview"
+    deployment="gpt-4o",          # your deployment name
+    api_key="...",
+    api_version="2024-10-21",
 )
 
 # Gemini
 from coflowai.providers.gemini import GeminiProvider
-provider = GeminiProvider(api_key="...")
+provider = GeminiProvider(model="gemini-2.0-flash", api_key="...")
 
 # Bedrock
 from coflowai.providers.bedrock import BedrockProvider
-provider = BedrockProvider(region_name="us-east-1")
+provider = BedrockProvider(model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",
+                           region_name="us-east-1")
 ```
 
 ## Persistence
@@ -268,9 +271,11 @@ event_store = SqliteEventStore("state.db")
 state_store = SqliteStateStore("state.db")
 
 # Postgres
-from coflowai.persistence.postgres import PostgresEventStore, PostgresStateStore
-event_store = PostgresEventStore(dsn="postgresql://...")
-state_store = PostgresStateStore(dsn="postgresql://...")
+from coflowai.persistence.postgres import (PostgresEventStore,
+                                           PostgresStateStore, create_pool)
+pool = await create_pool("postgresql://...")  # asyncpg pool, shared by both stores
+event_store = PostgresEventStore(pool)
+state_store = PostgresStateStore(pool, owner="worker-1")  # owner = lock holder id
 
 # Redis
 from coflowai.persistence.redis import RedisEventStore, RedisStateStore
@@ -284,7 +289,7 @@ app = CoFlowAi(event_store=event_store, state_store=state_store)
 ## Distributed Execution
 
 ```python
-from coflowai.distributed import ExecutionService, RedisJobQueue, Worker
+from coflowai.distributed import ExecutionService, RedisJobQueue, WorkerPool
 
 # Setup service
 queue = RedisJobQueue(redis_client)
@@ -294,20 +299,22 @@ service.register(workflow)
 # Submit job
 execution_id = await service.submit(workflow, "request")
 
-# Start worker
-worker = Worker(service=service, concurrency=4)
-await worker.run()
+# Start workers (in the worker process)
+pool = WorkerPool(app.runtime, queue, service.executables, size=4)
+await pool.start()
+...
+await pool.stop()          # graceful: drains in-flight jobs
 ```
 
 ## Events
 
 ```python
 # Get events
-events = await app.events.get_events(execution_id)
+events = await app.event_store.get_events(execution_id)
 
 for event in events:
     print(f"{event.timestamp}: {event.type}")
-    print(f"  {event.data}")
+    print(f"  {event.payload}")
 ```
 
 ## Tracing
@@ -357,14 +364,16 @@ from coflowai.core import (
     ToolError,
 )
 
-try:
-    result = await app.run(agent, "task")
-except BudgetExceeded as e:
-    print(f"Budget exceeded: {e}")
-except ExecutionTimeout as e:
-    print(f"Timeout after {e.elapsed}s")
-except ExecutionError as e:
-    print(f"Execution failed: {e}")
+# app.run() does not raise for execution failures: it returns a result
+# whose .status / .error tell you what happened.
+result = await app.run(agent, "task")
+if not result.succeeded:
+    if isinstance(result.error, BudgetExceeded):
+        print(f"Budget exceeded: {result.error}")
+    elif isinstance(result.error, ExecutionTimeout):
+        print("Timed out")
+    else:
+        print(f"Execution failed ({result.status.value}): {result.error}")
 ```
 
 ## Common Patterns
@@ -372,11 +381,13 @@ except ExecutionError as e:
 ### Retry on Failure
 ```python
 retry_policy = RetryPolicy(
-    max_retries=3,
-    backoff_seconds=2.0,
-    backoff_multiplier=2.0,
+    attempts=3,              # total tries per model/tool call
+    backoff="exponential",   # or "linear" / "fixed"
+    base_delay=1.0,          # seconds
+    max_delay=30.0,
+    jitter=True,
 )
-policy = ExecutionPolicy(retry_policy=retry_policy)
+policy = ExecutionPolicy(retry=retry_policy)
 ```
 
 ### Budget Limits

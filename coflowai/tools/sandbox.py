@@ -75,3 +75,14 @@ def _inject_metadata_params(tool: Tool, arguments: dict[str, Any],
         final_args["idempotency_key"] = metadata["idempotency_key"]
 
     return final_args
+
+
+
+
+def __getattr__(name: str):
+    # ``from coflowai.tools.sandbox import SubprocessSandbox`` (documented path);
+    # resolved lazily because subprocess_sandbox imports this module.
+    if name == "SubprocessSandbox":
+        from .subprocess_sandbox import SubprocessSandbox
+        return SubprocessSandbox
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

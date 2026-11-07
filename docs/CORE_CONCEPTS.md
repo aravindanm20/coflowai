@@ -235,15 +235,17 @@ permission=["read.data", "write.logs"]  # Multiple
 ```python
 # Tool-specific timeout
 @tool(timeout=5)
+async def lookup(query: str) -> str: ...
 
-# Execution-wide timeout
-policy = ExecutionPolicy(timeout_seconds=300)
-
-# Agent-specific timeout
-agent = Agent(..., timeout_seconds=60)
+# Execution-wide timeout, plus per-call defaults for models and tools
+policy = ExecutionPolicy(
+    timeout_seconds=300,
+    model_timeout_seconds=60,
+    tool_timeout_seconds=30,
+)
 ```
 
-Timeouts propagate down: execution → workflow node → agent → tool.
+Every model/tool timeout is clamped to the time left before the execution deadline.
 
 ### Sandboxed Execution
 
@@ -254,7 +256,7 @@ app = CoFlowAi(
     sandbox=SubprocessSandbox(
         cpu_seconds=5,
         memory_mb=256,
-        allowed_paths=["/tmp"],
+        working_dir="/tmp/sandbox",
     )
 )
 ```
@@ -296,26 +298,26 @@ Compilation errors are raised immediately, before any tokens are spent.
 
 **Sequence:**
 ```python
-.start(agent_a)
-.then(agent_b)
-.then(agent_c)
+Workflow("w").start(agent_a).then(agent_b).then(agent_c)
 ```
 
 **Parallel (fan-out/fan-in):**
 ```python
-.parallel(
+Workflow("w").parallel(
     agent_a,
     agent_b,
     agent_c,
     max_concurrency=2,
-    merge=lambda outputs: combine(outputs)
+    merge=lambda outputs: combine(outputs),  # {branch_name: output}
+    fail_fast=True,   # False = collect branch errors and continue
 )
 ```
 
 **Router (conditional):**
 ```python
-.route(
-    condition=lambda ctx: classify(ctx.state["result"]),
+# condition(output) or condition(output, context) -> route key
+Workflow("w").start(triage_agent).route(
+    condition=lambda output: classify(output),
     routes={
         "urgent": urgent_path,
         "normal": normal_path,
@@ -326,20 +328,25 @@ Compilation errors are raised immediately, before any tokens are spent.
 
 **Loop:**
 ```python
-.loop(
+# until(output) or until(output, context) -> bool
+Workflow("w").start(writer).loop(
     reviewer,
-    until=lambda ctx: ctx.state.get("approved", False),
+    until=lambda output, context: context.state.get("approved", False),
     max_iterations=3
 )
 ```
 
 **Human Approval:**
 ```python
-.approve(
-    message="Deploy to production?",
-    action=deploy_agent,
-    timeout_hours=24
+Workflow("w").start(build_agent).approve(
+    "Deploy to production?",
+    action=deploy_agent,   # runs only after approval
+    on_reject="fail",      # or "skip"
 )
+
+# later, from an API handler / operator CLI:
+await app.approve(execution_id, approval_id="approval", by="alice",
+                  executable=workflow)
 ```
 
 ### Workflow State
@@ -395,12 +402,11 @@ policy = ExecutionPolicy(
 from coflowai.policies import RetryPolicy
 
 policy = RetryPolicy(
-    max_retries=3,
-    backoff_seconds=1.0,
-    backoff_multiplier=2.0,
+    attempts=3,              # total tries per model/tool call
+    backoff="exponential",   # or "linear" / "fixed"
+    base_delay=1.0,          # seconds
+    max_delay=30.0,
     jitter=True,
-    retry_on=[RateLimitError, ModelTemporaryError],
-    never_retry_on=[ModelInvalidRequestError],
 )
 ```
 
@@ -415,13 +421,17 @@ policy = RetryPolicy(
 
 ```python
 class ModelProvider(ABC):
+    name: str = "provider"
+
     @abstractmethod
-    async def call(self, request: ModelRequest) -> ModelResponse:
-        """Synchronous model call."""
-    
-    @abstractmethod
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        """One model call. The only method a provider must implement."""
+
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamChunk]:
-        """Streaming model call."""
+        """Optional. The default emulates a stream from generate()."""
+
+    async def close(self) -> None:
+        """Optional. Release HTTP clients etc."""
 ```
 
 ### Model Registry
@@ -440,15 +450,15 @@ registry.register(
         streaming=True,
         reasoning=False,
         vision=True,
+        max_context_tokens=128_000,
     ),
     pricing=ModelPricing(
         input_per_million=2.50,
         output_per_million=10.00,
-        cache_write_per_million=1.25,
-        cache_read_per_million=0.25,
+        cached_input_per_million=1.25,
     ),
     fallbacks=["gpt-4o-mini"],
-    metadata={"max_tokens": 128_000},
+    tags={"general"},
 )
 ```
 
@@ -504,7 +514,7 @@ Built-in adapters handle provider differences:
 "execution.completed"
 "execution.failed"
 "execution.cancelled"
-"execution.checkpointed"
+"checkpoint.created"
 "execution.resumed"
 
 # Agent events
@@ -514,18 +524,18 @@ Built-in adapters handle provider differences:
 "agent.output_repaired"
 
 # Model events
-"model.call_started"
-"model.call_completed"
-"model.call_failed"
-"model.call_retrying"
+"model.requested"
+"model.completed"
+"model.failed"
+"model.retrying"
 "model.streaming_started"
 "model.streaming_completed"
 
 # Tool events
-"tool.call_started"
-"tool.call_completed"
-"tool.call_failed"
-"tool.permission_denied"
+"tool.started"
+"tool.completed"
+"tool.failed"
+"tool.denied"
 "tool.validation_failed"
 
 # Budget events
@@ -534,8 +544,8 @@ Built-in adapters handle provider differences:
 
 # Approval events
 "approval.requested"
-"approval.granted"
-"approval.denied"
+"approval.approved"
+"approval.rejected"
 "approval.timeout"
 ```
 
@@ -543,11 +553,11 @@ Built-in adapters handle provider differences:
 
 ```python
 # Get events for execution
-events = app.events.get_events(execution_id)
+events = await app.event_store.get_events(execution_id)
 
 for event in events:
     print(f"{event.timestamp}: {event.type}")
-    print(f"  Data: {event.data}")
+    print(f"  Data: {event.payload}")
 ```
 
 Events enable:
@@ -564,36 +574,34 @@ Events enable:
 ```python
 class MemoryStore(ABC):
     @abstractmethod
-    async def store(self, items: list[MemoryItem]) -> None:
-        """Store memory items."""
-    
+    async def put(self, key: str, value: Any, *,
+                  kind: MemoryKind = MemoryKind.LONG_TERM,
+                  metadata: dict[str, Any] | None = None) -> MemoryRecord: ...
+
     @abstractmethod
-    async def retrieve(
-        self,
-        query: str,
-        limit: int = 10,
-        filters: dict[str, Any] | None = None
-    ) -> list[MemoryItem]:
-        """Retrieve relevant memories."""
+    async def get(self, key: str) -> MemoryRecord | None: ...
+
+    @abstractmethod
+    async def search(self, query: str, *, limit: int = 10,
+                     kind: MemoryKind | None = None) -> list[MemoryRecord]: ...
+
+    @abstractmethod
+    async def delete(self, key: str) -> None: ...
 ```
 
 ### In-Memory Implementation
 
 ```python
-from coflowai.memory import InMemoryStore
+from coflowai.memory import InMemoryMemoryStore
 
-memory = InMemoryStore()
+memory = InMemoryMemoryStore()
 
-# Store conversation
-await memory.store([
-    MemoryItem(
-        content="User prefers concise responses",
-        metadata={"type": "preference", "user_id": "123"}
-    )
-])
+# Store a fact
+await memory.put("pref:123", "User prefers concise responses",
+                 metadata={"type": "preference", "user_id": "123"})
 
-# Retrieve relevant
-items = await memory.retrieve("communication style", limit=5)
+# Retrieve relevant records (each has .key, .value, .score)
+records = await memory.search("communication style", limit=5)
 ```
 
 Built-in implementation uses BM25-like lexical matching. No vector database required for local development.
@@ -617,12 +625,7 @@ Conversation History
 ```python
 from coflowai.observability import configure_logging
 
-configure_logging(
-    level="INFO",
-    format="json",
-    redact_secrets=True,
-    redact_patterns=[r"sk-[a-zA-Z0-9]+", r"Bearer [a-zA-Z0-9]+"]
-)
+configure_logging(level="INFO", json_output=True)   # JSON lines, secrets redacted
 ```
 
 ### Execution Tracing
@@ -645,10 +648,13 @@ print(trace.render())
 
 ```python
 from opentelemetry import trace
-from coflowai.observability import OpenTelemetryTracer
+from opentelemetry.sdk.trace import TracerProvider
 
-tracer = OpenTelemetryTracer(trace.get_tracer("coflowai"))
-app = CoFlowAi(tracer=tracer)
+trace.set_tracer_provider(TracerProvider())   # + your exporter
+
+# CoFlowAi mirrors its spans to OpenTelemetry automatically when
+# `opentelemetry-api` is installed -- just configure a TracerProvider.
+app = CoFlowAi()
 ```
 
 Traces mirror to OpenTelemetry for integration with:
@@ -697,14 +703,13 @@ async def update_record(): ...
 ### Secret Redaction
 
 ```python
-# Automatic pattern-based redaction
-configure_logging(
-    redact_secrets=True,
-    redact_patterns=[
+# Built-in redaction covers common key names and token formats; extend it with:
+from coflowai.observability.redaction import add_redaction_pattern
+
+add_redaction_pattern(
         r"sk-[a-zA-Z0-9]+",           # API keys
         r"Bearer [a-zA-Z0-9]+",        # Bearer tokens
         r"\b[A-Z0-9]{20,}\b",          # Long alphanumeric (AWS keys)
-    ]
 )
 ```
 
@@ -718,16 +723,16 @@ Secrets are redacted from:
 
 ```python
 workflow.approve(
-    message="Deploy to production?",
+    "Deploy to production?",
     action=deploy_agent,
-    metadata={"environment": "prod", "version": "1.2.0"},
-    timeout_hours=24
+    name="prod-gate",
 )
 
 # Execution pauses, checkpoint created
 # Worker released (no blocking)
 # Later, via API or CLI:
-await app.approve(execution_id, by="aravindan")
+await app.approve(execution_id, approval_id="prod-gate", by="aravindan",
+                  executable=workflow)
 ```
 
 ## Next Steps

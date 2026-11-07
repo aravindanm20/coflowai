@@ -39,17 +39,14 @@ CoFlowAi's distributed architecture separates job submission from execution:
 
 ```python
 from coflowai import CoFlowAi
-from coflowai.persistence.postgres import PostgresEventStore, PostgresStateStore
+from coflowai.persistence.postgres import (PostgresEventStore,
+                                           PostgresStateStore, create_pool)
 
 # Shared persistence for all workers
-event_store = PostgresEventStore(
-    dsn="postgresql://user:pass@postgres:5432/coflowai"
-)
+pool = await create_pool("postgresql://user:pass@postgres:5432/coflowai")  # asyncpg pool, shared by both stores
+event_store = PostgresEventStore(pool)
 
-state_store = PostgresStateStore(
-    dsn="postgresql://user:pass@postgres:5432/coflowai",
-    lock_lease_seconds=300  # 5-minute lock lease
-)
+state_store = PostgresStateStore(pool, owner="worker-1")  # owner = lock holder id
 
 app = CoFlowAi(
     event_store=event_store,
@@ -72,9 +69,10 @@ redis_client = redis.Redis(
 
 queue = RedisJobQueue(
     client=redis_client,
-    queue_name="coflowai:jobs",
-    visibility_timeout=600,  # 10 minutes
-    max_retries=3
+    namespace="coflowai",
+    queue="jobs",
+    visibility_timeout=600,  # 10 minutes; workers renew it while a job runs
+    max_attempts=3,          # then the job goes to the dead-letter list
 )
 
 # Create execution service
@@ -100,7 +98,7 @@ async def execute_workflow(request: dict):
     """Submit workflow for execution."""
     execution_id = await service.submit(
         executable=my_workflow,
-        request=request["input"],
+        input=request["input"],
         policy=ExecutionPolicy(max_cost=1.00)
     )
     
@@ -112,7 +110,7 @@ async def execute_workflow(request: dict):
 @api.get("/status/{execution_id}")
 async def get_status(execution_id: str):
     """Check execution status."""
-    state = await app.state_store.get(execution_id)
+    state = await app.state_store.get_execution(execution_id)
     return {
         "execution_id": execution_id,
         "status": state.status,
@@ -123,53 +121,56 @@ async def get_status(execution_id: str):
 #### 4. Run Workers
 
 ```python
-from coflowai.distributed import Worker
+import asyncio
+
+from coflowai.distributed import Worker, WorkerPool
 
 async def run_worker():
     """Worker process."""
-    worker = Worker(
-        service=service,
-        concurrency=4,  # Process 4 jobs concurrently
-        poll_interval_seconds=1.0,
-        max_jobs=1000  # Restart after 1000 jobs (optional)
-    )
-    
-    await worker.run()
+    # One Worker processes one job at a time; a pool runs N of them.
+    pool = WorkerPool(app.runtime, queue, service.executables, size=4)
+    await pool.start()
+    await asyncio.Event().wait()        # run until the process is stopped
+
+    # Or a single worker:
+    # await Worker(app.runtime, queue, service.executables).run_forever()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(run_worker())
 ```
 
 **Or via CLI:**
 
 ```bash
-coflowai worker app.py --concurrency 4 --poll-interval 1.0
+coflowai worker app.py --concurrency 4
 ```
 
 ### Lock Leasing
 
 Workers acquire locks on executions to prevent duplicate processing:
 
+The runtime does this for you on every `run`/`resume`; the calls below show
+what happens underneath.
+
 ```python
-# Worker A acquires lock
-lock = await state_store.acquire_lock(execution_id, lease_seconds=300)
+# Worker A leases the execution (False if someone else holds it)
+acquired = await state_store.acquire_lock(execution_id, ttl=60)
 
-# Worker A processes execution
-await runtime.execute(...)
+# While it runs, the runtime renews the lease every ttl/3
+await state_store.extend_lock(execution_id, ttl=60)
 
-# If Worker A crashes, lock expires after 300s
-# Worker B can then acquire the lock and resume
+# If Worker A crashes, the lease expires after `ttl` seconds and
+# Worker B can acquire it and resume from the last checkpoint.
 
-# Worker A releases lock on completion
-await state_store.release_lock(execution_id, lock.token)
+# On completion the lease is released (only by its owner)
+await state_store.release_lock(execution_id)
 ```
 
 **Key Properties:**
-- Fenced tokens prevent ABA problem
-- Atomic test-and-set operations
-- Configurable lease duration
-- Automatic expiry on crash
+- Leases are owned (`owner=` on the state store); only the owner can extend or release
+- Atomic test-and-set (Postgres row lock, Redis `SET NX PX` + Lua release)
+- Lease length: `Runtime(lock_ttl_seconds=...)` (default 60s)
+- A worker that loses its lease cancels its execution instead of running on
 
 ### At-Least-Once Delivery
 
@@ -177,12 +178,12 @@ Jobs may be delivered multiple times, but executions are idempotent:
 
 1. **Checkpointing** - Completed nodes are skipped on resume
 2. **Tool Idempotency Keys** - Side-effect tools get deterministic keys
-3. **State Versioning** - Optimistic concurrency control prevents conflicts
+3. **Leases** - Only one worker drives an execution at a time
 
 ```python
 # Job redelivered after timeout
 # Worker resumes from last checkpoint
-result = await app.resume(execution_id, workflow)
+result = await app.resume(execution_id, executable=workflow)
 
 # Completed nodes are skipped
 # Only incomplete work is re-executed
@@ -232,10 +233,10 @@ permissions = PermissionSet([
 ])
 
 # Check permissions
-permissions.check("database.users.read")       # ✓
-permissions.check("database.users.delete")     # ✗
-permissions.check("api.external.payment.charge") # ✓
-permissions.check("api.internal.analytics")     # ✓
+permissions.allows("database.users.read")       # ✓
+permissions.allows("database.users.delete")     # ✗
+permissions.allows("api.external.payment.charge") # ✓
+permissions.allows("api.internal.analytics")     # ✓
 ```
 
 #### Least Privilege
@@ -260,16 +261,18 @@ workflow = (
 #### Dynamic Permission Checks
 
 ```python
+from coflowai import PermissionDenied, tool
+
 @tool(description="Update record", permission="database.write")
 async def update_record(table: str, record_id: str, data: dict) -> dict:
-    """Permission checked at runtime."""
-    context = get_current_context()
-    
-    # Additional runtime checks
-    if not context.state.get("user_authorized"):
-        raise PermissionDenied("User not authorized")
-    
-    # Proceed
+    """The runtime checks `database.write` before this runs.
+
+    Tools receive only their arguments (no global context), so business rules
+    beyond the permission go in the tool itself; raising PermissionDenied is
+    reported back to the model as a denied call.
+    """
+    if table not in ALLOWED_TABLES:
+        raise PermissionDenied(f"writes to {table!r} are not allowed")
     return await db.update(table, record_id, data)
 ```
 
@@ -279,23 +282,22 @@ async def update_record(table: str, record_id: str, data: dict) -> dict:
 
 ```python
 from coflowai.observability import configure_logging
+from coflowai.observability.redaction import add_redaction_key, add_redaction_pattern
 
-configure_logging(
-    redact_secrets=True,
-    redact_patterns=[
-        r"sk-[a-zA-Z0-9]{20,}",        # OpenAI keys
-        r"sk-ant-[a-zA-Z0-9-]{20,}",   # Anthropic keys
-        r"Bearer [a-zA-Z0-9\-._~+/]+", # Bearer tokens
-        r"\bAKIA[A-Z0-9]{16}\b",       # AWS access keys
-        r"password['\"]?\s*[:=]\s*['\"]?([^'\"]+)", # Passwords
-    ]
+configure_logging(level="INFO", json_output=True)
+
+# Built in: keys like api_key/password/token/secret, sk-... keys, Bearer tokens
+# and connection-string passwords are always redacted. Add your own:
+add_redaction_pattern(
+    r"sk-[a-zA-Z0-9]{20,}",        # OpenAI keys
+    r"sk-ant-[a-zA-Z0-9-]{20,}",   # Anthropic keys
+    r"Bearer [a-zA-Z0-9\-._~+/]+", # Bearer tokens
+    r"\bAKIA[A-Z0-9]{16}\b",       # AWS access keys
+    r"password['\"]?\s*[:=]\s*['\"]?([^'\"]+)", # Passwords
 )
+add_redaction_key("ssn", "card_number")
 
-# Secrets automatically redacted from:
-# - Logs
-# - Events
-# - Traces
-# - Error messages
+# Redaction applies to logs, event payloads (tool arguments/outputs) and traces
 ```
 
 #### Environment-Based Configuration
@@ -305,6 +307,7 @@ import os
 
 # Never hardcode secrets
 provider = OpenAIProvider(
+    model="gpt-4o",
     api_key=os.environ["OPENAI_API_KEY"]
 )
 
@@ -324,25 +327,27 @@ from coflowai.tools.sandbox import SubprocessSandbox
 
 # Isolate untrusted tools
 sandbox = SubprocessSandbox(
-    cpu_seconds=5,              # CPU time limit
-    memory_mb=256,              # Memory limit
-    allowed_paths=["/tmp"],     # Filesystem access
-    blocked_syscalls=["socket"], # Block network
-    env_inherit=False,          # Scrubbed environment
+    cpu_seconds=5,              # RLIMIT_CPU
+    memory_mb=256,              # RLIMIT_AS
+    max_files=32,               # open file descriptors
+    env_allowlist=("PATH", "LANG"),  # everything else (incl. API keys) is scrubbed
+    working_dir="/tmp/sandbox",
 )
 
 app = CoFlowAi(sandbox=sandbox)
 
-@tool(description="Run user code", permission="code.execute")
-async def execute_code(code: str) -> str:
-    """Executed in isolated subprocess."""
-    # CPU, memory, and syscall limits enforced by OS
-    return eval(code)
+# Tools run in the sandbox must be module-level functions (importable by the
+# child process). Limits are OS rlimits; for network/filesystem isolation run
+# workers in containers (below).
+@tool(description="Summarise a file", permission="files.read")
+def summarise_file(path: str) -> str:
+    with open(path) as handle:
+        return handle.read()[:500]
 ```
 
 #### Container Sandbox
 
-```python
+```yaml
 # For maximum isolation, run workers in containers
 # docker-compose.yml
 services:
@@ -418,14 +423,14 @@ agent = Agent(
 
 ```python
 # All tool calls automatically logged
-for event in app.events.get_events(execution_id):
-    if event.type == "tool.call_started":
+for event in await app.event_store.get_events(execution_id):
+    if event.type == "tool.started":
         audit_log.info(
             "tool_called",
             execution_id=execution_id,
-            tool_name=event.data["tool_name"],
-            arguments=event.data["arguments"],
-            user=event.metadata.get("user_id"),
+            tool_name=event.payload["tool"],
+            arguments=event.payload["arguments"],
+            user=event.payload.get("user_id"),
             timestamp=event.timestamp
         )
 ```
@@ -514,10 +519,8 @@ def create_approval_workflow(approvers: list[str]) -> Workflow:
     """Sequential approval workflow."""
     workflow = Workflow("approval")
     for approver in approvers:
-        workflow.approve(
-            f"Approval required from {approver}",
-            metadata={"approver": approver}
-        )
+        workflow.approve(f"Approval required from {approver}",
+                         name=f"approval-{approver}")
     return workflow
 
 # Compose into main workflow
@@ -540,12 +543,12 @@ workflow_v1 = Workflow("pipeline", version="1.0.0")
 workflow_v2 = Workflow("pipeline", version="2.0.0")
 
 # Execution references specific version
-execution_id = await app.run(workflow_v1, request)
+execution_id = (await app.run(workflow_v1, request)).execution_id
 
 # Resume validates version compatibility
 try:
-    await app.resume(execution_id, workflow_v2)
-except WorkflowVersionMismatchError:
+    await app.resume(execution_id, executable=workflow_v2)
+except CheckpointError:   # from coflowai import CheckpointError
     # Version incompatible, cannot resume
     logger.error("Workflow version mismatch")
 ```
@@ -659,29 +662,28 @@ limits = Limits(
     keepalive_expiry=30.0
 )
 
+from coflowai.providers.http import HttpxTransport
+
 client = AsyncClient(limits=limits)
-provider = OpenAIProvider(api_key="...", client=client)
+provider = OpenAIProvider(model="gpt-4o", api_key="...",
+                          transport=HttpxTransport(client=client))
 ```
 
 ### Token Budgeting
 
 ```python
-from coflowai.context import ContextBuilder
+from coflowai import Agent, ContextBudget
 
-# Configure context builder with strict budgets
-context_builder = ContextBuilder(
-    max_tokens=4000,
-    section_budgets={
-        "instructions": 500,
-        "workflow_state": 300,
-        "memory": 500,
-        "tools": 500,
-        "conversation": 2000,
-    },
-    summarization_strategy="extractive"
+# Each agent assembles its context within a token budget. Over budget, it drops
+# low-relevance sections, applies per-section limits, then compresses the least
+# important sections (instructions are never dropped).
+agent = Agent(
+    "analyst",
+    "Analyse the data.",
+    "gpt-4o",
+    context_budget=ContextBudget(max_tokens=4000, conversation=2000, memory=500),
+    summariser=True,      # extractive (default); or ModelSummariser(...)
 )
-
-app = CoFlowAi(context_builder=context_builder)
 ```
 
 ---
@@ -732,11 +734,9 @@ provider = TracerProvider()
 provider.add_span_processor(BatchSpanProcessor(jaeger_exporter))
 trace.set_tracer_provider(provider)
 
-# Configure CoFlowAi tracer
-from coflowai.observability import OpenTelemetryTracer
-
-tracer = OpenTelemetryTracer(trace.get_tracer("coflowai"))
-app = CoFlowAi(tracer=tracer)
+# CoFlowAi mirrors its spans to OpenTelemetry automatically when
+# `opentelemetry-api` is installed -- just configure a TracerProvider.
+app = CoFlowAi()
 
 # Traces automatically sent to Jaeger
 result = await app.run(agent, request)
@@ -792,16 +792,16 @@ start_http_server(9090)
 async def debug_execution(execution_id: str):
     """Debug failed execution."""
     # Get execution state
-    state = await app.state_store.get(execution_id)
+    state = await app.state_store.get_execution(execution_id)
     print(f"Status: {state.status}")
     print(f"Error: {state.error}")
     
     # Get events
-    events = await app.events.get_events(execution_id)
+    events = await app.event_store.get_events(execution_id)
     for event in events:
-        if event.type in ["execution.failed", "model.call_failed", "tool.call_failed"]:
+        if event.type in ["execution.failed", "model.failed", "tool.failed"]:
             print(f"{event.timestamp}: {event.type}")
-            print(f"  Data: {event.data}")
+            print(f"  Data: {event.payload}")
     
     # Get trace
     trace = app.trace(execution_id)
@@ -820,80 +820,86 @@ async def debug_execution(execution_id: str):
 ### Implementing a Provider
 
 ```python
-from coflowai.models import ModelProvider, ModelRequest, ModelResponse
-from coflowai.models import StreamChunk
 from typing import AsyncIterator
 
+from coflowai.core import ToolCall
+from coflowai.models import (ChunkType, ModelProvider, ModelRequest, ModelResponse,
+                             StreamChunk)
+
+
 class CustomProvider(ModelProvider):
-    """Custom model provider implementation."""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.client = CustomAPIClient(api_key)
-    
-    async def call(self, request: ModelRequest) -> ModelResponse:
-        """Synchronous model call."""
-        response = await self.client.complete(
+    """Only generate() is required; stream() is emulated if you omit it."""
+
+    name = "custom"
+
+    def __init__(self, client):
+        self.client = client            # your SDK / HTTP client
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        raw = await self.client.complete(
             model=request.model,
-            messages=request.messages,
+            messages=[m.to_dict() for m in request.messages],
             temperature=request.temperature,
-            max_tokens=request.max_tokens,
+            max_tokens=request.max_output_tokens,
             tools=request.tools,
         )
-        
         return ModelResponse(
-            content=response["content"],
-            tool_calls=self._parse_tool_calls(response.get("tool_calls", [])),
-            usage={
-                "input_tokens": response["usage"]["prompt_tokens"],
-                "output_tokens": response["usage"]["completion_tokens"],
-            },
-            raw_response=response,
+            text=raw.get("content"),
+            tool_calls=[ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
+                        for c in raw.get("tool_calls", [])],
+            input_tokens=raw["usage"]["prompt_tokens"],
+            output_tokens=raw["usage"]["completion_tokens"],
+            finish_reason=raw.get("finish_reason", "stop"),
+            raw_response=raw,
         )
-    
+
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamChunk]:
-        """Streaming model call."""
-        async for chunk in self.client.stream(
-            model=request.model,
-            messages=request.messages,
-        ):
-            if chunk["type"] == "content":
-                yield StreamChunk(
-                    text=chunk["text"],
-                    is_final=False,
-                )
-            elif chunk["type"] == "done":
-                yield StreamChunk(
-                    text="",
-                    is_final=True,
-                    metadata={"usage": chunk["usage"]},
-                )
+        text = []
+        async for event in self.client.stream(model=request.model,
+                                              messages=[m.to_dict() for m in request.messages]):
+            if event["type"] == "content":
+                text.append(event["text"])
+                yield StreamChunk(type=ChunkType.TEXT, text=event["text"])
+            elif event["type"] == "done":
+                # the final chunk carries the authoritative usage for budgets
+                yield StreamChunk(type=ChunkType.DONE, response=ModelResponse(
+                    text="".join(text),
+                    input_tokens=event["usage"]["prompt_tokens"],
+                    output_tokens=event["usage"]["completion_tokens"],
+                ))
 ```
 
 ### Provider Testing
 
-```python
-from coflowai.providers.testing import MockTransport
+Built-in HTTP adapters accept a `transport`; `MockTransport` returns canned
+JSON so adapter tests need no network or keys:
 
-class TestCustomProvider:
-    """Test custom provider with mock transport."""
-    
-    @pytest.mark.asyncio
-    async def test_call(self):
-        mock = MockTransport(responses=[
-            {"content": "Hello!", "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
-        ])
-        
-        provider = CustomProvider(api_key="test", transport=mock)
-        
-        response = await provider.call(ModelRequest(
-            model="custom-model",
-            messages=[{"role": "user", "content": "Hi"}]
-        ))
-        
-        assert response.content == "Hello!"
-        assert response.usage["input_tokens"] == 10
+```python
+import pytest
+
+from coflowai.core import Message
+from coflowai.models import ModelRequest
+from coflowai.providers.http import MockTransport
+from coflowai.providers.openai import OpenAIProvider
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_parses_usage():
+    mock = MockTransport(responses=[{
+        "choices": [{"message": {"role": "assistant", "content": "Hello!"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }])
+    provider = OpenAIProvider(model="gpt-4o", api_key="test", transport=mock)
+
+    response = await provider.generate(ModelRequest(messages=[Message.user("Hi")]))
+
+    assert response.text == "Hello!"
+    assert response.input_tokens == 10
+    assert mock.requests[0]["model"] == "gpt-4o"
 ```
+
+For your own provider, test `generate()` against a fake client the same way.
 
 ---
 
@@ -932,9 +938,15 @@ class MyPlugin(Plugin):
 
 ```python
 # Via code
-app = CoFlowAi(plugins=[MyPlugin(config={"key": "value"})])
+app = CoFlowAi()
+app.register_plugin(MyPlugin())
+await app.setup()          # runs plugin.setup(app); or `async with CoFlowAi() as app:`
 
-# Via entry points (pyproject.toml)
+# Via entry points: CoFlowAi(auto_discover_plugins=True)
+```
+
+```toml
+# pyproject.toml of the plugin package
 [project.entry-points."coflowai.plugins"]
 myplugin = "myplugin:MyPlugin"
 ```

@@ -133,6 +133,12 @@ def _coerce(payload: Scripted) -> ModelResponse:
         return ModelResponse(tool_calls=[payload], finish_reason="tool_calls")
     if isinstance(payload, list) and payload and isinstance(payload[0], ToolCall):
         return ModelResponse(tool_calls=list(payload), finish_reason="tool_calls")
+    if isinstance(payload, list) and payload and all(
+            isinstance(i, dict) and "name" in i and "arguments" in i for i in payload):
+        return ModelResponse(
+            tool_calls=[ToolCall(id=i.get("id") or tool_call_id(), name=i["name"],
+                                 arguments=dict(i["arguments"])) for i in payload],
+            finish_reason="tool_calls")
     if isinstance(payload, (dict, list)):
         return ModelResponse(text=json.dumps(payload), finish_reason="stop")
     return ModelResponse(text=str(payload), finish_reason="stop")

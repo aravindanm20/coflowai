@@ -411,8 +411,10 @@ provider SDKs. Install only the extras you use.
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests -q      # 167 tests, no network or API keys required
+python -m pytest tests -q      # 210 tests, no network or API keys required
 ruff check coflowai
 mypy coflowai
+python scripts/check_docs.py          # docs snippets match the real API
+python scripts/gen_api_reference.py   # regenerate docs/API_REFERENCE.md
 ```
 

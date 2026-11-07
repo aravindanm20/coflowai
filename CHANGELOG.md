@@ -3,6 +3,49 @@
 All notable changes to CoFlowAi are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is semantic.
 
+## [1.0.1] — Correctness and operability fixes
+
+### Fixed
+- **Approvals and exactly-once side effects**: state written inside a workflow
+  node (approval ledger, idempotency ledger, agent conversations, nested
+  progress) was lost because child scopes are deep copies; it is now merged back
+  (`ExecutionContext.merge_durable_state`), including when a node fails.
+- **Parallel nodes**: a failing branch raised an opaque `ExceptionGroup`; the
+  real error (e.g. `ApprovalRequired`, `BudgetExceeded`) is now surfaced.
+  With `fail_fast=False`, control-flow signals (approval, cancellation,
+  timeout, budget/step limits) are no longer swallowed as "branch failures" —
+  previously a pending approval could be silently skipped.
+- **Parallel budgets**: concurrent branches each checked a private snapshot and
+  could jointly overspend `max_model_calls`/`max_tool_calls`/`max_tokens`/
+  `max_cost`. Enforcement now uses one execution-wide `UsageLedger` with atomic
+  call-slot reservations.
+- Custom executables returning a plain value no longer crash the runtime.
+
+### Added
+- Per-branch progress for `ParallelNode`: completed branches are not re-run on
+  resume (e.g. after a sibling paused for approval).
+- `Runtime(cache_size=, cache_ttl_seconds=, lock_ttl_seconds=)`; per-execution
+  runtime caches are now bounded (LRU/TTL) instead of growing forever.
+- `RedisJobQueue.extend()` and a worker lease heartbeat, so jobs longer than the
+  visibility timeout are not redelivered while still running.
+- `CoFlowAi.event_store` / `CoFlowAi.state_store` properties; explicit
+  signatures on `CoFlowAi.run/stream/resume/approve/reject/cancel/fork`.
+- Exceptions re-exported from `coflowai.core`; `ExecutionMode` from
+  `coflowai.policies`; `StreamChunk`/`ChunkType` from `coflowai.models`.
+- `scripts/check_docs.py` (validates every docs snippet against the real API)
+  and `scripts/gen_api_reference.py` (generates `docs/API_REFERENCE.md`); both
+  run in CI (`.github/workflows/ci.yml`).
+
+### Changed
+- `JsonlEventStore.append` is O(1) amortised (was a full-file re-read per
+  event: ~100x faster at 1,000 events).
+- `RedisJobQueue` keys in-flight jobs by `job_id` (O(log n) ack instead of a
+  full scan); `recover()` is safe to run concurrently and dead-letters jobs
+  that exhausted `max_attempts`. Legacy in-flight entries are still recovered.
+- Documentation rewritten where it described APIs that don't exist (121
+  mismatches fixed); `app.run()` failure handling is documented correctly
+  (failures are returned on the result, not raised).
+
 ## [1.0.0] — Boundaries filled
 
 Closes every interface that 0.9.0 left scaffolded. The framework now runs against

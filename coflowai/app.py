@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, AsyncIterator, Iterable
 
 from .core.result import ExecutionResult
 from .events.store import EventStore
@@ -113,6 +113,17 @@ class CoFlowAi:
     def memory(self) -> MemoryStore | None:
         return self.runtime.memory
 
+    @property
+    def event_store(self) -> EventStore:
+        """The event log (``await app.event_store.get_events(execution_id)``)."""
+        return self.runtime.event_store
+
+    @property
+    def state_store(self) -> StateStore:
+        """Execution records and checkpoints
+        (``await app.state_store.get_execution(execution_id)``)."""
+        return self.runtime.state_store
+
     def use_memory(self, store: MemoryStore) -> None:
         self.runtime.memory = store
 
@@ -123,32 +134,60 @@ class CoFlowAi:
         self.runtime.publisher.subscribe(subscriber, event_type=event_type)
 
     # ------------------------------------------------------------ execution
+    # Explicit signatures (instead of **kwargs) so IDEs, type checkers and
+    # scripts/check_docs.py catch misspelt arguments before runtime.
     async def run(self, executable: Any, input: Any = None, *,
                   policy: ExecutionPolicy | None = None,
-                  **kwargs: Any) -> ExecutionResult:
-        return await self.runtime.run(executable, input, policy=policy, **kwargs)
+                  execution_id: str | None = None,
+                  permissions: PermissionSet | Iterable[str] | None = None,
+                  metadata: dict[str, Any] | None = None,
+                  state: dict[str, Any] | None = None) -> ExecutionResult:
+        return await self.runtime.run(executable, input, policy=policy,
+                                      execution_id=execution_id,
+                                      permissions=permissions,
+                                      metadata=metadata, state=state)
 
-    def stream(self, executable: Any, input: Any = None, **kwargs: Any):
+    def stream(self, executable: Any, input: Any = None, *,
+               policy: ExecutionPolicy | None = None,
+               execution_id: str | None = None,
+               permissions: PermissionSet | Iterable[str] | None = None,
+               metadata: dict[str, Any] | None = None) -> AsyncIterator[Any]:
         """Stream an agent execution (async iterator of ``StreamChunk``)."""
-        return self.runtime.stream(executable, input, **kwargs)
+        return self.runtime.stream(executable, input, policy=policy,
+                                   execution_id=execution_id,
+                                   permissions=permissions, metadata=metadata)
 
-    async def resume(self, execution_id: str, **kwargs: Any) -> ExecutionResult:
-        return await self.runtime.resume(execution_id, **kwargs)
+    async def resume(self, execution_id: str, *, executable: Any = None,
+                     policy: ExecutionPolicy | None = None) -> ExecutionResult:
+        return await self.runtime.resume(execution_id, executable=executable,
+                                         policy=policy)
 
-    async def approve(self, execution_id: str, **kwargs: Any) -> ExecutionResult:
-        return await self.runtime.approve(execution_id, **kwargs)
+    async def approve(self, execution_id: str, *, approval_id: str | None = None,
+                      by: str | None = None, note: str | None = None,
+                      executable: Any = None) -> ExecutionResult:
+        return await self.runtime.approve(execution_id, approval_id=approval_id,
+                                          by=by, note=note, executable=executable)
 
-    async def reject(self, execution_id: str, **kwargs: Any) -> ExecutionResult:
-        return await self.runtime.reject(execution_id, **kwargs)
+    async def reject(self, execution_id: str, *, approval_id: str | None = None,
+                     by: str | None = None, note: str | None = None,
+                     executable: Any = None) -> ExecutionResult:
+        return await self.runtime.reject(execution_id, approval_id=approval_id,
+                                         by=by, note=note, executable=executable)
 
-    async def cancel(self, execution_id: str, **kwargs: Any) -> bool:
-        return await self.runtime.cancel(execution_id, **kwargs)
+    async def cancel(self, execution_id: str, *,
+                     reason: str = "cancelled by operator") -> bool:
+        return await self.runtime.cancel(execution_id, reason=reason)
 
     async def replay(self, execution_id: str) -> ReplayTrace:
         return await self.runtime.replay(execution_id)
 
-    async def fork(self, execution_id: str, **kwargs: Any) -> ExecutionResult:
-        return await self.runtime.fork(execution_id, **kwargs)
+    async def fork(self, execution_id: str, *, from_step: int,
+                   overrides: dict[str, Any] | None = None,
+                   executable: Any = None,
+                   policy: ExecutionPolicy | None = None) -> ExecutionResult:
+        return await self.runtime.fork(execution_id, from_step=from_step,
+                                       overrides=overrides, executable=executable,
+                                       policy=policy)
 
     # ----------------------------------------------------------- inspection
     def trace(self, execution_id: str):

@@ -296,7 +296,7 @@ async def test_real_provider():
     if not os.getenv("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
     
-    provider = OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
+    provider = OpenAIProvider(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
     # ... test with real provider
 ```
 

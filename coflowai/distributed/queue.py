@@ -140,6 +140,14 @@ class RedisJobQueue(JobQueue):
                                 json.dumps(job.to_dict(), default=str))
         return job
 
+    # Layout (all under ``{ns}:{queue}:``):
+    #   pending     LIST  of job JSON              (LPUSH / BRPOP)
+    #   processing  ZSET  job_id -> lease deadline (in-flight jobs)
+    #   inflight    HASH  job_id -> job JSON       (payload of in-flight jobs)
+    #   dead        LIST  of job JSON              (dead-letter)
+    # Keying in-flight jobs by ``job_id`` makes ack/nack O(log n); the old
+    # layout stored the JSON as the ZSET member, so every ack fetched and
+    # parsed the *entire* processing set.
     async def dequeue(self, *, timeout: float = 1.0) -> Job | None:
         raw = await self.client.brpop(self._key("pending"), timeout=int(timeout) or 1)
         if raw is None:
@@ -147,10 +155,18 @@ class RedisJobQueue(JobQueue):
         _key, payload = raw
         job = Job.from_dict(json.loads(payload))
         job.attempts += 1
+        await self.client.hset(self._key("inflight"), job.job_id,
+                               json.dumps(job.to_dict(), default=str))
         await self.client.zadd(self._key("processing"),
-                               {json.dumps(job.to_dict(), default=str):
-                                time.time() + self.visibility_timeout})
+                               {job.job_id: time.time() + self.visibility_timeout})
         return job
+
+    async def extend(self, job: Job, *, seconds: float | None = None) -> None:
+        """Heartbeat: push the lease deadline out for a long-running job."""
+        await self.client.zadd(self._key("processing"),
+                               {job.job_id: time.time()
+                                + (seconds or self.visibility_timeout)},
+                               xx=True)
 
     async def ack(self, job: Job) -> None:
         await self._remove_in_flight(job)
@@ -163,21 +179,38 @@ class RedisJobQueue(JobQueue):
         else:
             await self.client.lpush(self._key("dead"), payload)
 
-    async def _remove_in_flight(self, job: Job) -> None:
-        members = await self.client.zrange(self._key("processing"), 0, -1)
-        for member in members:
-            if json.loads(member).get("job_id") == job.job_id:
-                await self.client.zrem(self._key("processing"), member)
-                return
+    async def _remove_in_flight(self, job: Job) -> bool:
+        removed = await self.client.zrem(self._key("processing"), job.job_id)
+        await self.client.hdel(self._key("inflight"), job.job_id)
+        return bool(removed)
 
     async def recover(self) -> int:
-        """Requeue jobs whose visibility timeout expired (worker crashed)."""
+        """Requeue jobs whose visibility timeout expired (worker crashed).
+
+        Safe to run from several workers at once: only the caller whose ``ZREM``
+        actually removed the entry requeues it.  Jobs that already used
+        ``max_attempts`` go to the dead-letter list instead of looping forever.
+        """
         now = time.time()
         expired = await self.client.zrangebyscore(self._key("processing"), 0, now)
+        recovered = 0
         for member in expired:
-            await self.client.zrem(self._key("processing"), member)
-            await self.client.lpush(self._key("pending"), member)
-        return len(expired)
+            member = member.decode() if isinstance(member, bytes) else member
+            if not await self.client.zrem(self._key("processing"), member):
+                continue                        # another worker got it first
+            if member.lstrip().startswith("{"):  # legacy layout: JSON member
+                payload = member
+            else:
+                payload = await self.client.hget(self._key("inflight"), member)
+                await self.client.hdel(self._key("inflight"), member)
+                if payload is None:
+                    continue
+                payload = payload.decode() if isinstance(payload, bytes) else payload
+            job = Job.from_dict(json.loads(payload))
+            target = "pending" if job.attempts < self.max_attempts else "dead"
+            await self.client.lpush(self._key(target), payload)
+            recovered += 1
+        return recovered
 
     async def depth(self) -> int:
         return int(await self.client.llen(self._key("pending")))

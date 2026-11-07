@@ -57,8 +57,9 @@ class ToolExecutor:
         await context.emit(EventType.TOOL_REQUESTED, tool=call.name,
                            tool_call_id=call.id, agent=context.agent_name,
                            arguments=redact(call.arguments))
+        reservation = None
         try:
-            await context.check_tool_budget()
+            reservation = await context.check_tool_budget()
             tool = self._resolve(call, allowed_tools)
             self._authorise(context, tool, call)
             arguments = tool.validate_arguments(call.arguments)
@@ -68,26 +69,31 @@ class ToolExecutor:
             overrides = context.state.get(TOOL_OVERRIDES_KEY) or {}
             if call.name in overrides:
                 return await self._finish(context, call, overrides[call.name],
-                                          started, replayed=True)
+                                          started, replayed=True,
+                                          reservation=reservation)
 
             cached = self._idempotent_hit(context, tool, call)
             if cached is not None:
                 return await self._finish(context, call, cached, started,
-                                          replayed=True)
+                                          replayed=True, reservation=reservation)
 
             output = await self._run(context, tool, arguments, call)
             output = tool.validate_output(output)
             self._remember_idempotent(context, tool, call, output)
-            return await self._finish(context, call, output, started)
+            return await self._finish(context, call, output, started,
+                                      reservation=reservation)
 
         except (PermissionDenied,) as exc:
             await context.emit(EventType.TOOL_DENIED, tool=call.name,
                                tool_call_id=call.id, reason=str(exc))
-            return self._failure(call, exc, started, context)
+            return self._failure(call, exc, started, context, reservation)
         except (ToolNotFound, ValidationError, ToolError) as exc:
             await context.emit(EventType.TOOL_FAILED, tool=call.name,
                                tool_call_id=call.id, error=repr(exc))
-            return self._failure(call, exc, started, context)
+            return self._failure(call, exc, started, context, reservation)
+        finally:
+            if reservation is not None:
+                reservation.release()   # no-op if already recorded
 
     # ----------------------------------------------------------- pipeline bits
     def _resolve(self, call: ToolCall, allowed: set[str] | None):
@@ -198,9 +204,10 @@ class ToolExecutor:
 
     # ------------------------------------------------------------- completion
     async def _finish(self, context: ExecutionContext, call: ToolCall, output: Any,
-                      started: float, *, replayed: bool = False) -> ToolResult:
+                      started: float, *, replayed: bool = False,
+                      reservation: Any = None) -> ToolResult:
         duration_ms = (time.perf_counter() - started) * 1000
-        context.tool_calls += 1
+        context.record_tool_call(reservation)
         if context.services is not None:
             context.services.usage.record_tool(
                 tool=call.name, agent=context.agent_name,
@@ -218,9 +225,9 @@ class ToolExecutor:
 
     @staticmethod
     def _failure(call: ToolCall, error: Exception, started: float,
-                 context: ExecutionContext) -> ToolResult:
+                 context: ExecutionContext, reservation: Any = None) -> ToolResult:
         duration_ms = (time.perf_counter() - started) * 1000
-        context.tool_calls += 1
+        context.record_tool_call(reservation)
         if context.services is not None:
             context.services.metrics.increment("coflowai.tool.failures",
                                                tool=call.name,

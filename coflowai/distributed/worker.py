@@ -97,8 +97,10 @@ class Worker:
         job = await self.queue.dequeue(timeout=self.poll_timeout)
         if job is None:
             return None
+        heartbeat = self._start_lease_heartbeat(job)
         try:
             result = await self._execute(job)
+            heartbeat.cancel()
             await self.queue.ack(job)
             self.processed += 1
             if self.on_result is not None:
@@ -116,7 +118,33 @@ class Worker:
             # Config errors are permanent — requeuing would just spin.
             await self.queue.nack(job,
                                   requeue=not isinstance(exc, ConfigurationError))
+        finally:
+            heartbeat.cancel()
         return job
+
+    def _start_lease_heartbeat(self, job: Job) -> asyncio.Task[None]:
+        """Keep extending the queue lease while a long job runs.
+
+        Without this, any job longer than the queue's visibility timeout is
+        handed to a second worker by ``recover()`` while the first is still
+        running it.  Queues without leases (in-memory) don't define ``extend``.
+        """
+        extend = getattr(self.queue, "extend", None)
+        timeout = getattr(self.queue, "visibility_timeout", None)
+
+        async def beat() -> None:
+            if extend is None or not timeout:
+                return
+            interval = max(0.05, timeout / 3)
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await extend(job)
+                except Exception as exc:  # never kill the job over a heartbeat
+                    _log.warning("worker.lease_extend_failed", worker=self.name,
+                                 job_id=job.job_id, error=repr(exc))
+
+        return asyncio.create_task(beat(), name=f"lease-heartbeat:{job.job_id}")
 
     def stop(self) -> None:
         self._stopping.set()

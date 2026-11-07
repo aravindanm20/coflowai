@@ -101,7 +101,19 @@ def open_database(path: str | Path) -> sqlite3.Connection:
     connection.execute("PRAGMA synchronous=NORMAL")
     connection.execute("PRAGMA busy_timeout=5000")
     connection.executescript(_SCHEMA)
+    _migrate(connection)
     return connection
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Bring databases created by older versions up to the current schema.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so columns
+    added later must be added explicitly or every INSERT would fail.
+    """
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(executions)")}
+    if "permissions" not in columns:
+        connection.execute("ALTER TABLE executions ADD COLUMN permissions TEXT")
 
 
 class _SqliteBase:
@@ -310,8 +322,9 @@ def _row_to_event(row: sqlite3.Row) -> Event:
 
 
 def _row_to_record(row: sqlite3.Row) -> ExecutionRecord:
-    # Handle old records without permissions column
-    permissions_data = row.get("permissions") if "permissions" in row.keys() else None
+    # sqlite3.Row has no .get(); databases created before 1.0.1 may also lack
+    # the permissions column entirely.
+    permissions_data = row["permissions"] if "permissions" in row.keys() else None
     record = ExecutionRecord(
         execution_id=row["execution_id"], status=ExecutionStatus(row["status"]),
         input=_load(row["input"]), output=_load(row["output"]),

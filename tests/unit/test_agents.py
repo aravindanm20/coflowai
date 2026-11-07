@@ -51,7 +51,9 @@ async def test_agent_uses_tools_then_answers():
     assert events == [
         "execution.created", "execution.started", "agent.started",
         "model.requested", "model.completed",
+        "checkpoint.created",                       # write-ahead: before tools
         "tool.requested", "tool.started", "tool.completed",
+        "checkpoint.created",                       # after tool results
         "model.requested", "model.completed",
         "agent.completed", "checkpoint.created", "execution.completed",
     ]

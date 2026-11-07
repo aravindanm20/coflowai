@@ -8,13 +8,22 @@ from enum import Enum
 from typing import Any, Callable, Iterable, Sequence
 
 from ..core.context import ExecutionContext
-from ..core.exceptions import WorkflowError
+from ..core.exceptions import (BudgetExceeded, ExecutionCancelled,
+                               ExecutionTimeout, MaxStepsExceeded, WorkflowError)
+from ..approvals.approval import ApprovalRequired
 from ..core.executable import Executable, as_executable
 from ..core.ids import stable_hash
 from ..core.result import ExecutionResult
 from ..core.types import ExecutionStatus
+from ..events.event import EventType
 
-__all__ = ["NodeKind", "Node", "SequenceNode", "ParallelNode", "RouterNode",
+#: Exceptions that are execution-level signals, never "a branch failed".
+_CONTROL_FLOW: tuple[type[BaseException], ...] = (
+    ApprovalRequired, ExecutionCancelled, ExecutionTimeout, BudgetExceeded,
+    MaxStepsExceeded, asyncio.CancelledError)
+#: State key prefix for the per-branch completion ledger of ParallelNode.
+PARALLEL_PROGRESS_KEY = "__parallel_progress__"
+__all__ = ["PARALLEL_PROGRESS_KEY", "NodeKind", "Node", "SequenceNode", "ParallelNode", "RouterNode",
            "LoopNode", "TransformNode"]
 
 
@@ -86,8 +95,10 @@ class SequenceNode(Executable):
         for step in self.steps:
             context.ensure_alive()
             child = context.child(input=current, node_id=step.name)
-            result = await step.execute(child)
-            context.merge_from(child)
+            try:
+                result = await step.execute(child)
+            finally:
+                context.merge_from(child)
             if not result.succeeded:
                 return result
             current = result.output
@@ -131,20 +142,41 @@ class ParallelNode(Executable):
         semaphore = asyncio.Semaphore(max(1, limit))
         baseline = context.child()
         children: list[ExecutionContext] = []
-
+        # Per-branch progress ledger: a branch that already finished is never
+        # re-run on resume (e.g. after a sibling paused for approval or failed).
+        progress_key = f"{PARALLEL_PROGRESS_KEY}:{context.node_id or ''}:{self.name}"
+        done: dict[str, Any] = context.state.get(progress_key) or {}
+        context.state[progress_key] = done
         async def run(branch: Executable) -> tuple[str, ExecutionResult,
-                                                   ExecutionContext]:
+                                                   ExecutionContext | None]:
+            if branch.name in done:
+                await context.emit(EventType.WORKFLOW_NODE_SKIPPED,
+                                   node_id=f"{self.name}.{branch.name}",
+                                   reason="parallel branch already completed")
+                return branch.name, ExecutionResult(
+                    execution_id=context.execution_id,
+                    status=ExecutionStatus.COMPLETED,
+                    output=done[branch.name]), None
             async with semaphore:
                 child = context.child(node_id=f"{self.name}.{branch.name}")
                 children.append(child)
-                return branch.name, await branch.execute(child), child
+                result = await branch.execute(child)
+                if result.succeeded:
+                    done[branch.name] = result.output
+                return branch.name, result, child
 
         outputs: dict[str, Any] = {}
         failures: dict[str, BaseException] = {}
 
         if self.fail_fast:
-            async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(run(b)) for b in self.branches]
+            try:
+                async with asyncio.TaskGroup() as group:
+                    tasks = [group.create_task(run(b)) for b in self.branches]
+            except BaseExceptionGroup as group_error:
+                context.absorb_parallel(children, baseline)
+                # surface the real error (e.g. ApprovalRequired, BudgetExceeded),
+                # not an opaque ExceptionGroup
+                raise group_error.exceptions[0] from group_error
             pairs = [t.result() for t in tasks]
         else:
             pairs = []
@@ -155,6 +187,14 @@ class ParallelNode(Executable):
                     failures[branch.name] = item
                 else:
                     pairs.append(item)
+            # "Collect errors" applies to *branch* failures only.  Control-flow
+            # signals (approval pause, cancellation, timeout, budget/step limits)
+            # must still stop the execution -- otherwise a pending approval would
+            # be silently dropped and the workflow would continue without it.
+            for item in gathered:
+                if isinstance(item, _CONTROL_FLOW):
+                    context.absorb_parallel(children, baseline)
+                    raise item
 
         for name, result, _child in pairs:
             if result.succeeded:
@@ -170,6 +210,10 @@ class ParallelNode(Executable):
             raise first if isinstance(first, BaseException) else WorkflowError(
                 "parallel branch failed")
 
+        # Node finished: reset the ledger (None, not pop, so the reset also
+        # propagates through merge_durable_state) -- a loop iteration that
+        # re-enters this node must run every branch again.
+        context.state[progress_key] = None
         output = self.merge(outputs) if self.merge else outputs
         return ExecutionResult(
             execution_id=context.execution_id,
@@ -227,8 +271,10 @@ class RouterNode(Executable):
                 route=key, known=sorted(self.routes),
             )
         child = context.child(node_id=f"{self.name}.{key or 'default'}")
-        result = await target.execute(child)
-        context.merge_from(child)
+        try:
+            result = await target.execute(child)
+        finally:
+            context.merge_from(child)
         result.metadata.setdefault("route", key)
         return result
 
@@ -266,8 +312,10 @@ class LoopNode(Executable):
             iterations = iteration
             child = context.child(input=current,
                                   node_id=f"{self.name}#{iteration}")
-            result = await self.body.execute(child)
-            context.merge_from(child)
+            try:
+                result = await self.body.execute(child)
+            finally:
+                context.merge_from(child)
             if not result.succeeded:
                 return result
             current = result.output

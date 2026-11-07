@@ -195,7 +195,7 @@ assert model.call_count == 2
 from coflowai import CoFlowAi
 from coflowai.providers.openai import OpenAIProvider
 
-provider = OpenAIProvider(api_key="sk-...")
+provider = OpenAIProvider(model="gpt-4o", api_key="sk-...")
 app = CoFlowAi()
 app.models.register(
     "gpt-4o",
@@ -213,7 +213,7 @@ result = await app.run(agent, "Analyze this data...")
 ```python
 from coflowai.providers.anthropic import AnthropicProvider
 
-provider = AnthropicProvider(api_key="sk-ant-...")
+provider = AnthropicProvider(model="claude-sonnet-4", api_key="sk-ant-...")
 app.models.register(
     "claude-sonnet-4",
     provider=provider,
@@ -228,9 +228,10 @@ app.models.register(
 from coflowai.providers.openai import AzureOpenAIProvider
 
 provider = AzureOpenAIProvider(
-    api_key="...",
     endpoint="https://your-resource.openai.azure.com",
-    api_version="2024-02-15-preview"
+    deployment="gpt-4o",          # your deployment name
+    api_key="...",
+    api_version="2024-10-21",
 )
 ```
 
@@ -280,7 +281,7 @@ result = await app.run(workflow, "process data")
 execution_id = result.execution_id
 
 # Later, after crash or restart
-await app.resume(execution_id, workflow)
+await app.resume(execution_id, executable=workflow)
 ```
 
 Completed nodes are skipped, never rerun. Workflow hash is verified for compatibility.
@@ -309,8 +310,8 @@ print(f"Tool calls: {result.usage.tool_calls}")
 
 ```python
 # Listen to events
-for event in app.events.get_events(execution_id):
-    print(f"{event.type}: {event.data}")
+for event in await app.event_store.get_events(execution_id):
+    print(f"{event.type}: {event.payload}")
 ```
 
 ## CLI Commands

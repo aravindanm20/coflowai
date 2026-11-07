@@ -28,7 +28,50 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..state.store import StateStore
     from ..tools.registry import ToolRegistry
 
-__all__ = ["ExecutionContext", "RuntimeServices"]
+__all__ = ["ExecutionContext", "RuntimeServices", "UsageLedger", "Reservation"]
+
+
+@dataclass(slots=True)
+class UsageLedger:
+    """Execution-wide usage totals shared by *every* scope of one execution.
+
+    Child contexts keep their own counters (per-node accounting), but budget
+    enforcement reads this ledger, so concurrent parallel branches see each
+    other's consumption immediately instead of each checking a stale private
+    snapshot.  Call-count limits use *reservations* taken synchronously when
+    the check passes, so N branches racing for the last slot can't all pass.
+    """
+
+    model_calls: int = 0
+    tool_calls: int = 0
+    tokens: int = 0
+    cost: float = 0.0
+    reserved_model_calls: int = 0
+    reserved_tool_calls: int = 0
+
+    @classmethod
+    def from_context(cls, context: "ExecutionContext") -> "UsageLedger":
+        return cls(model_calls=context.model_calls, tool_calls=context.tool_calls,
+                   tokens=context.total_tokens, cost=context.cost)
+
+
+@dataclass(slots=True)
+class Reservation:
+    """A budget slot taken by ``check_*_budget``; ``release`` is idempotent."""
+
+    ledger: UsageLedger | None
+    kind: str                     # "model" | "tool"
+    active: bool = True
+
+    def release(self) -> None:
+        if not self.active or self.ledger is None:
+            self.active = False
+            return
+        self.active = False
+        if self.kind == "model":
+            self.ledger.reserved_model_calls = max(0, self.ledger.reserved_model_calls - 1)
+        else:
+            self.ledger.reserved_tool_calls = max(0, self.ledger.reserved_tool_calls - 1)
 
 
 @dataclass(slots=True)
@@ -79,6 +122,9 @@ class ExecutionContext:
     deadline: float | None = None
     _cancelled: bool = False
     _budget_warned: bool = False
+    #: shared by all scopes of one execution, so budget.warning fires once
+    _budget_flags: dict[str, bool] = field(default_factory=dict)
+    _ledger: UsageLedger | None = None
 
     # ------------------------------------------------------------------ setup
     def __post_init__(self) -> None:
@@ -149,7 +195,46 @@ class ExecutionContext:
             started_at=self.started_at,
             deadline=self.deadline,
         )
+        # one ledger per execution, created lazily from the root's counters
+        # (which already include usage restored from a checkpoint)
+        if self._ledger is None:
+            self._ledger = UsageLedger.from_context(self)
+        child._ledger = self._ledger
+        child._budget_flags = self._budget_flags
         return child
+
+    # ------------------------------------------------------- usage recording
+    def _totals(self) -> tuple[int, int, int, float]:
+        """(model_calls incl. reserved, tool_calls incl. reserved, tokens, cost)."""
+        ledger = self._ledger
+        if ledger is None:
+            return self.model_calls, self.tool_calls, self.total_tokens, self.cost
+        return (ledger.model_calls + ledger.reserved_model_calls,
+                ledger.tool_calls + ledger.reserved_tool_calls,
+                ledger.tokens, ledger.cost)
+
+    def record_model_usage(self, *, input_tokens: int = 0, output_tokens: int = 0,
+                           cached_tokens: int = 0, cost: float = 0.0,
+                           reservation: Reservation | None = None) -> None:
+        """Account one completed model call in this scope *and* the ledger."""
+        self.model_calls += 1
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.cached_tokens += cached_tokens
+        self.cost += cost
+        if self._ledger is not None:
+            if reservation is not None:
+                reservation.release()
+            self._ledger.model_calls += 1
+            self._ledger.tokens += input_tokens + output_tokens
+            self._ledger.cost += cost
+
+    def record_tool_call(self, reservation: Reservation | None = None) -> None:
+        self.tool_calls += 1
+        if self._ledger is not None:
+            if reservation is not None:
+                reservation.release()
+            self._ledger.tool_calls += 1
 
     def merge_from(self, child: "ExecutionContext") -> None:
         """Fold a child's consumption back into this context."""
@@ -161,6 +246,26 @@ class ExecutionContext:
         self.output_tokens = max(self.output_tokens, child.output_tokens)
         self.cached_tokens = max(self.cached_tokens, child.cached_tokens)
         self.cost = max(self.cost, child.cost)
+        self.merge_durable_state(child)
+
+    def merge_durable_state(self, child: "ExecutionContext") -> None:
+        """Propagate framework-owned state (``__``-prefixed keys) to this scope.
+
+        Children work on a deep copy of state, so ledgers written inside a node
+        (approvals, idempotency results, agent conversations, nested workflow
+        progress) must be folded back, or they vanish from parent-level
+        checkpoints -- breaking approvals and exactly-once side effects on
+        resume.  Dict ledgers merge in place so references held by running
+        workflows stay valid; other values are replaced.
+        """
+        for key, value in child.state.items():
+            if not key.startswith("__"):
+                continue
+            current = self.state.get(key)
+            if isinstance(current, dict) and isinstance(value, dict):
+                current.update(value)
+            else:
+                self.state[key] = value
 
     def absorb_parallel(self, children: list["ExecutionContext"],
                         baseline: "ExecutionContext") -> None:
@@ -173,6 +278,7 @@ class ExecutionContext:
             self.cached_tokens += child.cached_tokens - baseline.cached_tokens
             self.cost += child.cost - baseline.cost
             self.step = max(self.step, child.step)
+            self.merge_durable_state(child)
 
     # ------------------------------------------------------------ enforcement
     def cancel(self) -> None:
@@ -200,43 +306,66 @@ class ExecutionContext:
         self.policy.check_step(self.step)
         return self.step
 
-    async def check_model_budget(self) -> None:
+    async def check_model_budget(self) -> Reservation:
+        """Check execution-wide limits and atomically reserve a model-call slot.
+
+        Check + reserve contain no ``await``, so they are atomic with respect to
+        sibling coroutines.  The reservation is released when usage is
+        recorded (or by the caller on failure).
+        """
         self.ensure_alive()
+        model_calls, _tools, tokens, cost = self._totals()
         try:
-            self.policy.check_model_call(model_calls=self.model_calls,
-                                         tokens=self.total_tokens, cost=self.cost)
+            self.policy.check_model_call(model_calls=model_calls,
+                                         tokens=tokens, cost=cost)
         except Exception as exc:
             await self.emit(EventType.BUDGET_EXCEEDED, reason=str(exc), scope="model")
             raise
+        if self._ledger is not None:
+            self._ledger.reserved_model_calls += 1
+        reservation = Reservation(self._ledger, "model")
         await self.maybe_warn_budget()
+        return reservation
 
-    async def check_tool_budget(self) -> None:
+    async def check_tool_budget(self) -> Reservation:
         self.ensure_alive()
+        _models, tool_calls, tokens, cost = self._totals()
         try:
-            self.policy.check_tool_call(tool_calls=self.tool_calls,
-                                        tokens=self.total_tokens, cost=self.cost)
+            self.policy.check_tool_call(tool_calls=tool_calls,
+                                        tokens=tokens, cost=cost)
         except Exception as exc:
             await self.emit(EventType.BUDGET_EXCEEDED, reason=str(exc), scope="tool")
             raise
+        if self._ledger is not None:
+            self._ledger.reserved_tool_calls += 1
+        reservation = Reservation(self._ledger, "tool")
         await self.maybe_warn_budget()
+        return reservation
 
     async def maybe_warn_budget(self) -> None:
-        """Emit ``budget.warning`` once consumption crosses the threshold."""
-        if self._budget_warned:
+        """Emit ``budget.warning`` once per execution when usage crosses the threshold."""
+        if self._budget_warned or self._budget_flags.get("warned"):
             return
         budget = self.policy.budget
+        if self._ledger is not None:
+            ledger = self._ledger
+            cost, tokens = ledger.cost, ledger.tokens
+            model_calls, tool_calls = ledger.model_calls, ledger.tool_calls
+        else:
+            cost, tokens = self.cost, self.total_tokens
+            model_calls, tool_calls = self.model_calls, self.tool_calls
         utilisation = budget.utilisation(
-            cost=self.cost, tokens=self.total_tokens,
-            model_calls=self.model_calls, tool_calls=self.tool_calls,
+            cost=cost, tokens=tokens, model_calls=model_calls, tool_calls=tool_calls,
         )
         if utilisation >= budget.warn_at:
             self._budget_warned = True
+            self._budget_flags["warned"] = True
             await self.emit(
                 EventType.BUDGET_WARNING,
                 utilisation=round(utilisation, 3),
                 remaining=budget.remaining(
-                    cost=self.cost, tokens=self.total_tokens,
-                    model_calls=self.model_calls, tool_calls=self.tool_calls,
+                    cost=cost, tokens=tokens,
+                    model_calls=model_calls, tool_calls=tool_calls,
                 ),
             )
 

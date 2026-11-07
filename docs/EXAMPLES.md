@@ -140,32 +140,24 @@ for finding in report.key_findings:
 
 ```python
 """Agent with conversation memory."""
-from coflowai import Agent
-from coflowai.memory import InMemoryStore, MemoryItem
+from coflowai import Agent, CoFlowAi
+from coflowai.memory import InMemoryMemoryStore
 
 # Setup memory
-memory = InMemoryStore()
-await memory.store([
-    MemoryItem(
-        content="User's name is Alice",
-        metadata={"type": "user_info"}
-    ),
-    MemoryItem(
-        content="User prefers Python over JavaScript",
-        metadata={"type": "preference"}
-    ),
-    MemoryItem(
-        content="User is working on a web scraping project",
-        metadata={"type": "context"}
-    )
-])
+memory = InMemoryMemoryStore()
+await memory.put("user:name", "User's name is Alice", metadata={"type": "user_info"})
+await memory.put("user:lang", "User prefers Python over JavaScript",
+                 metadata={"type": "preference"})
+await memory.put("user:project", "User is working on a web scraping project",
+                 metadata={"type": "context"})
 
-app = CoFlowAi(memory_store=memory)
+app = CoFlowAi(memory=memory)
 
 agent = Agent(
     "assistant",
     "You are a helpful programming assistant. Use memory to personalize responses.",
-    "gpt-4o"
+    "gpt-4o",
+    memory_limit=5,          # top-k records added to the agent's context
 )
 
 # Memory is automatically retrieved and included
@@ -181,20 +173,20 @@ result = await app.run(
 ```python
 """Agent with custom retry policy."""
 from coflowai.policies import RetryPolicy, ExecutionPolicy
-from coflowai.core import RateLimitError, ModelTemporaryError
+from coflowai.core import RateLimitError, ModelUnavailable
 
 retry_policy = RetryPolicy(
-    max_retries=3,
-    backoff_seconds=1.0,
-    backoff_multiplier=2.0,
+    attempts=3,              # total tries per model/tool call
+    backoff="exponential",   # or "linear" / "fixed"
+    base_delay=1.0,          # seconds
+    max_delay=30.0,
     jitter=True,
-    retry_on=[RateLimitError, ModelTemporaryError]
 )
 
 policy = ExecutionPolicy(
     max_steps=20,
     max_cost=1.00,
-    retry_policy=retry_policy
+    retry=retry_policy
 )
 
 agent = Agent("assistant", "Help the user", "gpt-4o")
@@ -348,16 +340,10 @@ deployment_workflow = (
     Workflow("deploy-pipeline")
     .start(Agent("builder", "Build application", "gpt-4o"))
     .then(Agent("tester", "Run test suite", "gpt-4o"))
-    .approve(
-        message="Tests passed. Deploy to staging?",
-        metadata={"environment": "staging"}
-    )
+    .approve("Tests passed. Deploy to staging?", name="staging-gate")
     .then(Agent("deployer", "Deploy to staging", "gpt-4o", tools=[deploy]))
-    .approve(
-        message="Staging validation complete. Deploy to production?",
-        metadata={"environment": "production"},
-        timeout_hours=24
-    )
+    .approve("Staging validation complete. Deploy to production?",
+             name="production-gate")
     .then(Agent("deployer", "Deploy to production", "gpt-4o", tools=[deploy]))
 )
 
@@ -512,31 +498,29 @@ async def search_api(query: str) -> list[dict]:
 
 ### Tool with Context Access
 
+Tools deliberately receive only their validated arguments -- there is no
+global "current context" (that would break concurrent and distributed
+execution). To read or write workflow state, use a `transform` step, which
+receives the execution context as an optional second argument:
+
 ```python
-"""Tool that accesses execution context."""
-from coflowai import tool
-from coflowai.core import get_current_context
+from coflowai import Workflow
 
-@tool(description="Save data to workflow state", permission="state.write")
-async def save_to_state(key: str, value: Any) -> dict:
-    """Save data to execution state."""
-    context = get_current_context()
-    context.state[key] = value
-    
-    # Emit event
-    context.events.emit("data.saved", {
-        "key": key,
-        "execution_id": context.execution_id
-    })
-    
-    return {"status": "saved", "key": key}
+def save_analysis(output, context):
+    """Deterministic step: no model call, no cost."""
+    context.state["analysis"] = output
+    return output
 
-@tool(description="Load data from workflow state", permission="state.read")
-async def load_from_state(key: str) -> Any:
-    """Load data from execution state."""
-    context = get_current_context()
-    return context.state.get(key)
+workflow = (
+    Workflow("analysis")
+    .start(analyst_agent)
+    .transform(save_analysis, name="save")
+    .then(report_agent)
+)
 ```
+
+Side-effect tools that must not run twice can declare an `idempotency_key`
+parameter; the runtime injects a stable key (hidden from the model).
 
 ---
 
@@ -552,6 +536,7 @@ from coflowai.models import ModelCapabilities, ModelPricing
 
 # Setup provider
 provider = OpenAIProvider(
+    model="gpt-4o",
     api_key="sk-...",
     organization="org-...",  # Optional
 )
@@ -586,7 +571,7 @@ result = await app.run(agent, "Explain asyncio")
 """Using Anthropic provider."""
 from coflowai.providers.anthropic import AnthropicProvider
 
-provider = AnthropicProvider(api_key="sk-ant-...")
+provider = AnthropicProvider(model="claude-sonnet-4", api_key="sk-ant-...")
 
 app.models.register(
     "claude-sonnet-4",
@@ -610,16 +595,16 @@ app.models.register(
 from coflowai.providers.openai import OpenAIProvider
 from coflowai.providers.anthropic import AnthropicProvider
 
-openai = OpenAIProvider(api_key="...")
-anthropic = AnthropicProvider(api_key="...")
+openai = OpenAIProvider(model="gpt-4o", api_key="...")
+anthropic = AnthropicProvider(model="claude-sonnet-4", api_key="...")
 
 app = CoFlowAi()
 
 # Primary: OpenAI
-app.models.register("gpt-4o", provider=openai, ...)
+app.models.register("gpt-4o", provider=openai)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 # Fallback: Anthropic
-app.models.register("claude-sonnet-4", provider=anthropic, ...)
+app.models.register("claude-sonnet-4", provider=anthropic)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 # Agent with automatic fallback
 agent = Agent(
@@ -701,9 +686,9 @@ async def test_real_openai():
     if not os.getenv("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
     
-    provider = OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
+    provider = OpenAIProvider(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
     app = CoFlowAi()
-    app.models.register("gpt-4o-mini", provider=provider, ...)
+    app.models.register("gpt-4o-mini", provider=provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
     
     agent = Agent("math", "Solve math problems", "gpt-4o-mini")
     result = await app.run(
@@ -727,14 +712,16 @@ async def test_real_openai():
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from coflowai import CoFlowAi, Workflow
-from coflowai.persistence.postgres import PostgresEventStore, PostgresStateStore
+from coflowai.persistence.postgres import (PostgresEventStore,
+                                           PostgresStateStore, create_pool)
 from coflowai.distributed import ExecutionService, RedisJobQueue
 
 # Setup
 app_api = FastAPI()
 
-event_store = PostgresEventStore(dsn="postgresql://...")
-state_store = PostgresStateStore(dsn="postgresql://...")
+pool = await create_pool("postgresql://...")  # asyncpg pool, shared by both stores
+event_store = PostgresEventStore(pool)
+state_store = PostgresStateStore(pool, owner="worker-1")  # owner = lock holder id
 coflowai_app = CoFlowAi(event_store=event_store, state_store=state_store)
 
 queue = RedisJobQueue(redis_client)
@@ -752,7 +739,7 @@ async def create_execution(request: ExecutionRequest):
     try:
         execution_id = await service.submit(
             executable=my_workflow,
-            request=request.input_data,
+            input=request.input_data,
             policy=ExecutionPolicy(max_cost=request.max_cost)
         )
         return {"execution_id": execution_id, "status": "queued"}
@@ -785,7 +772,7 @@ async def health():
 """Production worker with monitoring."""
 import signal
 import asyncio
-from coflowai.distributed import Worker
+from coflowai.distributed import WorkerPool
 import structlog
 
 logger = structlog.get_logger()
@@ -801,21 +788,15 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 async def run_worker():
     """Run worker with graceful shutdown."""
-    worker = Worker(
-        service=service,
-        concurrency=4,
-        poll_interval_seconds=1.0,
-    )
-    
-    worker_task = asyncio.create_task(worker.run())
+    pool = WorkerPool(app.runtime, queue, service.executables, size=4)
+    await pool.start()
     
     # Wait for shutdown signal
     await shutdown_event.wait()
     
     # Graceful shutdown
     logger.info("Stopping worker...")
-    worker.stop()
-    await worker_task
+    await pool.stop(drain_timeout=30)
     logger.info("Worker stopped")
 
 if __name__ == "__main__":
@@ -838,15 +819,13 @@ executions_total = Counter("executions_total", "Total executions", ["status"])
 execution_duration = Histogram("execution_duration_seconds", "Duration")
 execution_cost = Histogram("execution_cost_dollars", "Cost")
 
-# Configure tracing
-from coflowai.observability import OpenTelemetryTracer
-tracer = OpenTelemetryTracer(trace.get_tracer("coflowai"))
+# Tracing: spans are mirrored to OpenTelemetry automatically once a
+# TracerProvider is configured (opentelemetry-sdk).
 
 # Setup app
 app = CoFlowAi(
     event_store=event_store,
     state_store=state_store,
-    tracer=tracer
 )
 
 # Wrapper with observability

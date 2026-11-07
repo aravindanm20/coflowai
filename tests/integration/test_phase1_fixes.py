@@ -163,39 +163,43 @@ class TestPermissionsPersistence:
         assert set(record.permissions) == {"database.read", "api.call"}
 
     @pytest.mark.asyncio
-    async def test_permissions_restored_on_resume(self, runtime, agent):
-        """Resume should use original permissions, not runtime default."""
-        # Start with narrow permissions
-        narrow = PermissionSet(["database.read"])
-        result = await runtime.run(agent, "test", permissions=narrow)
-        exec_id = result.execution_id
-
-        # Change runtime default to wildcard
-        runtime.permissions = PermissionSet.all()
-
-        # Resume should restore original narrow permissions
-        context = await runtime.resume(exec_id)
-
-        # The resumed context should have narrow permissions
-        record = await runtime.state_store.get_execution(exec_id)
-        assert set(record.permissions) == {"database.read"}
+    async def test_permissions_restored_on_resume(self):
+        """Resume must use the original (narrow) grant, not the runtime default."""
+        runtime = Runtime(state_store=InMemoryStateStore(),
+                          permissions=PermissionSet(["database.read"]))
+        provider = FakeModelProvider([])            # empty script -> first run fails
+        runtime.models.register("fake", provider)
+        agent = Agent(name="a", model="fake", instructions="x")
+        failed = await runtime.run(agent, "go",
+                                   policy=ExecutionPolicy(retry_attempts=0))
+        assert failed.status is ExecutionStatus.FAILED
+        runtime.permissions = PermissionSet.all()  # widen the default afterwards
+        seen = []
+        original_services = runtime._services
+        def spy(context):
+            seen.append(set(context.permissions.granted))
+            return original_services(context)
+        runtime._services = spy
+        provider.responses.append("recovered")
+        resumed = await runtime.resume(failed.execution_id)
+        assert resumed.succeeded
+        assert seen == [{"database.read"}]
 
     @pytest.mark.asyncio
-    async def test_policy_restored_on_resume(self, runtime, agent):
-        """Resume should restore original policy from record."""
-        # Run with specific policy
-        policy = ExecutionPolicy(mode=ExecutionMode.STRICT, max_steps=5)
-        result = await runtime.run(agent, "test", policy=policy)
-        exec_id = result.execution_id
-
-        # Clear in-memory policy cache
-        runtime._policies.clear()
-
-        # Resume should restore policy from record
-        await runtime.create_checkpoint(
-            runtime._running.get(exec_id) or runtime._running[exec_id],
-            reason="test"
-        )
+    async def test_policy_restored_on_resume(self):
+        """With the in-memory cache cleared, policy is rebuilt from the record."""
+        runtime = Runtime(state_store=InMemoryStateStore())
+        provider = FakeModelProvider([])
+        runtime.models.register("fake", provider)
+        agent = Agent(name="a", model="fake", instructions="x", temperature=0.9)
+        policy = ExecutionPolicy(mode=ExecutionMode.STRICT, max_steps=5,
+                                 retry_attempts=0)
+        failed = await runtime.run(agent, "go", policy=policy)
+        runtime._policies.clear()                   # simulate a fresh process
+        provider.responses.append("ok")
+        resumed = await runtime.resume(failed.execution_id)
+        assert resumed.succeeded
+        assert provider.calls[-1].temperature == 0.0   # STRICT survived
 
 
 class TestLockOwnership:

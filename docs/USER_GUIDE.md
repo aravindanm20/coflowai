@@ -22,9 +22,9 @@ Common patterns, recipes, and best practices for CoFlowAi.
 from coflowai import Agent, CoFlowAi
 from coflowai.providers.openai import OpenAIProvider
 
-provider = OpenAIProvider(api_key="...")
+provider = OpenAIProvider(model="gpt-4o", api_key="...")
 app = CoFlowAi()
-app.models.register("gpt-4o", provider=provider, ...)
+app.models.register("gpt-4o", provider=provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 agent = Agent(
     "assistant",
@@ -95,23 +95,17 @@ if review.severity == "high":
 ### Conversational Agent with Memory
 
 ```python
-from coflowai.memory import InMemoryStore, MemoryItem
+from coflowai.memory import InMemoryMemoryStore
 
-memory = InMemoryStore()
+memory = InMemoryMemoryStore()
 
 # Store conversation context
-await memory.store([
-    MemoryItem(
-        content="User prefers concise responses",
-        metadata={"type": "preference"}
-    ),
-    MemoryItem(
-        content="Last discussed: Python asyncio",
-        metadata={"type": "context"}
-    )
-])
+await memory.put("pref:style", "User prefers concise responses",
+                 metadata={"type": "preference"})
+await memory.put("ctx:topic", "Last discussed: Python asyncio",
+                 metadata={"type": "context"})
 
-app = CoFlowAi(memory_store=memory)
+app = CoFlowAi(memory=memory)
 
 agent = Agent(
     "assistant",
@@ -127,8 +121,8 @@ result = await app.run(agent, "Continue our discussion")
 
 ```python
 # Register multiple models
-app.models.register("gpt-4o", provider=openai_provider, ...)
-app.models.register("claude-sonnet-4", provider=anthropic_provider, ...)
+app.models.register("gpt-4o", provider=openai_provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
+app.models.register("claude-sonnet-4", provider=anthropic_provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
 
 # Agent with capability requirements
 agent = Agent(
@@ -378,16 +372,29 @@ async def charge_payment(
 
 ### Tool with Context Access
 
-```python
-from coflowai.core import get_current_context
+Tools deliberately receive only their validated arguments -- there is no
+global "current context" (that would break concurrent and distributed
+execution). To read or write workflow state, use a `transform` step, which
+receives the execution context as an optional second argument:
 
-@tool(description="Save to execution state", permission="state.write")
-async def save_analysis(key: str, value: Any) -> dict:
-    """Access execution context within tool."""
-    context = get_current_context()
-    context.state[key] = value
-    return {"status": "saved", "key": key}
+```python
+from coflowai import Workflow
+
+def save_analysis(output, context):
+    """Deterministic step: no model call, no cost."""
+    context.state["analysis"] = output
+    return output
+
+workflow = (
+    Workflow("analysis")
+    .start(analyst_agent)
+    .transform(save_analysis, name="save")
+    .then(report_agent)
+)
 ```
+
+Side-effect tools that must not run twice can declare an `idempotency_key`
+parameter; the runtime injects a stable key (hidden from the model).
 
 ### Rate-Limited Tool
 
@@ -430,38 +437,32 @@ async def search_api(query: str) -> list[str]:
 
 ```python
 from coflowai.policies import RetryPolicy, ExecutionPolicy
-from coflowai.core import ModelTemporaryError
+from coflowai.core import ModelUnavailable
 
 retry_policy = RetryPolicy(
-    max_retries=3,
-    backoff_seconds=2.0,
-    backoff_multiplier=2.0,
+    attempts=3,              # total tries per model/tool call
+    backoff="exponential",   # or "linear" / "fixed"
+    base_delay=1.0,          # seconds
+    max_delay=30.0,
     jitter=True,
-    retry_on=[ModelTemporaryError],
 )
 
 policy = ExecutionPolicy(
     max_cost=5.00,
-    retry_policy=retry_policy
+    retry=retry_policy
 )
 
-try:
-    result = await app.run(agent, request, policy=policy)
-except BudgetExceeded as e:
-    # Budget exhausted
-    logger.warning(f"Budget exceeded: {e}")
+# Failures come back on the result (app.run does not raise for them)
+result = await app.run(agent, request, policy=policy)
+if isinstance(result.error, BudgetExceeded):
+    logger.warning(f"Budget exceeded: {result.error}")
     # Fall back to cached response or simpler model
-except RateLimitError as e:
-    # Rate limited
+elif isinstance(result.error, RateLimitError):
     logger.warning("Rate limited, queueing for later")
     await queue_for_retry(request)
-except ExecutionTimeout as e:
-    # Timeout
-    logger.error(f"Timeout after {e.elapsed}s")
-    # Check if partial results available
-    if e.execution_id:
-        checkpoint = await app.state_store.get(e.execution_id)
-        # Use partial results
+elif isinstance(result.error, ExecutionTimeout):
+    # Completed nodes are checkpointed: resume later instead of starting over
+    await app.resume(result.execution_id, executable=agent)
 ```
 
 ### Fallback Models
@@ -487,11 +488,12 @@ from coflowai.core import ExecutionError
 
 async def run_with_recovery(agent, request):
     """Execute with custom recovery logic."""
-    try:
-        return await app.run(agent, request)
-    except ExecutionError as e:
-        # Log to monitoring
-        await log_to_datadog(e)
+    result = await app.run(agent, request)
+    if result.succeeded:
+        return result
+    e = result.error
+    await log_to_datadog(e)
+    if True:
         
         # Attempt recovery based on error type
         if isinstance(e, RateLimitError):
@@ -505,8 +507,7 @@ async def run_with_recovery(agent, request):
             return await app.run(agent, request)
         
         else:
-            # Can't recover, propagate
-            raise
+            return result   # can't recover
 ```
 
 ---
@@ -616,9 +617,9 @@ async def test_structured_output():
 @pytest.mark.asyncio
 async def test_real_openai():
     """Integration test with real provider."""
-    provider = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"])
+    provider = OpenAIProvider(model="gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"])
     app = CoFlowAi()
-    app.models.register("gpt-4o-mini", provider=provider, ...)
+    app.models.register("gpt-4o-mini", provider=provider)  # optional: capabilities=..., pricing=..., fallbacks=[...]
     
     agent = Agent(
         "assistant",
@@ -707,9 +708,8 @@ policy = ExecutionPolicy(
     max_model_calls=10,      # Limit iterations
 )
 
-try:
-    result = await app.run(agent, request, policy=policy)
-except BudgetExceeded:
+result = await app.run(agent, request, policy=policy)
+if isinstance(result.error, BudgetExceeded):
     # Handle budget exhaustion
     logger.warning("Budget exceeded, using cached response")
 ```
@@ -721,16 +721,13 @@ except BudgetExceeded:
 ### Durable Persistence
 
 ```python
-from coflowai.persistence.postgres import PostgresEventStore, PostgresStateStore
+from coflowai.persistence.postgres import (PostgresEventStore,
+                                           PostgresStateStore, create_pool)
 
 # Production-ready persistence
-event_store = PostgresEventStore(
-    dsn="postgresql://user:pass@host/db"
-)
-state_store = PostgresStateStore(
-    dsn="postgresql://user:pass@host/db",
-    lock_lease_seconds=300
-)
+pool = await create_pool("postgresql://user:pass@host/db")  # asyncpg pool, shared by both stores
+event_store = PostgresEventStore(pool)
+state_store = PostgresStateStore(pool, owner="worker-1")  # owner = lock holder id
 
 app = CoFlowAi(
     event_store=event_store,
@@ -757,8 +754,10 @@ execution_id = await service.submit(workflow, request)
 return {"execution_id": execution_id}
 
 # In worker process: process jobs
-worker = Worker(service=service, concurrency=4)
-await worker.run()
+from coflowai.distributed import WorkerPool
+
+pool = WorkerPool(app.runtime, queue, service.executables, size=4)
+await pool.start()
 ```
 
 ### Observability
@@ -768,15 +767,7 @@ from coflowai.observability import configure_logging
 import structlog
 
 # Structured logging
-configure_logging(
-    level="INFO",
-    format="json",
-    redact_secrets=True,
-    redact_patterns=[
-        r"sk-[a-zA-Z0-9]+",
-        r"Bearer [a-zA-Z0-9]+",
-    ]
-)
+configure_logging(level="INFO", json_output=True)   # secrets are redacted by default
 
 logger = structlog.get_logger()
 
@@ -856,16 +847,13 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 async def worker_loop():
     """Worker with graceful shutdown."""
-    worker = Worker(service=service, concurrency=4)
-    
-    # Run until shutdown
-    worker_task = asyncio.create_task(worker.run())
+    pool = WorkerPool(app.runtime, queue, service.executables, size=4)
+    await pool.start()
     await shutdown_event.wait()
-    
-    # Graceful shutdown
+
+    # Graceful shutdown: stop leasing new jobs, drain in-flight ones
     logger.info("Shutdown signal received, finishing current executions...")
-    worker.stop()
-    await worker_task
+    await pool.stop(drain_timeout=30)
     logger.info("Worker stopped")
 ```
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "coflowai"
-version = "1.0.0"
+version = "1.0.1"
 description = "Production-grade agentic AI framework: deterministic runtime, provider-independent models, replayable executions."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -60,6 +60,7 @@ packages = ["coflowai"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["asyncio: async test (run natively by conftest)", "integration: needs real services"]
 filterwarnings = ["error::RuntimeWarning", "ignore::pytest.PytestConfigWarning"]
 
 [tool.ruff]

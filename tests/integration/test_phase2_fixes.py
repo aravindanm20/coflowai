@@ -77,64 +77,44 @@ class TestWriteAheadCheckpointing:
 
 
 class TestPendingToolCallReplay:
-    """Test that unanswered tool calls are replayed on resume."""
+    """A crash between 'model asked for tools' and 'tools ran' must replay
+    exactly those calls, with the same ids, on resume."""
 
     @pytest.mark.asyncio
     async def test_resume_replays_pending_tool_calls(self):
-        """Resume should detect and replay unanswered tool calls with same IDs."""
+        from coflowai.core.types import Message, ToolCall
+        from coflowai.state.checkpoint import Checkpoint, ExecutionRecord
         runtime = Runtime(state_store=InMemoryStateStore())
-        runtime.models.register("fake", FakeModelProvider(["Done after resume"]))
-
-        tool_call_ids = []
+        provider = FakeModelProvider(["Done after resume"])
+        runtime.models.register("fake", provider)
+        seen = []
 
         @tool()
         async def tracked_tool(value: str) -> str:
-            # Simulate a tool that tracks the call for deduplication
-            tool_call_ids.append(value)
+            seen.append(value)
             return f"Processed: {value}"
 
-        agent = Agent(
-            name="test-agent",
-            model="fake",
-            instructions="test",
-            tools=[tracked_tool]
-        )
-
-        # Start an execution
-        exec_id = "test-resume-123"
-        result1 = await runtime.run(agent, "test", execution_id=exec_id)
-
-        # Manually create a situation where tool call exists but no result
-        # by modifying the conversation state
-        from coflowai.core.types import Message, ToolCall
-
-        # Simulate crash after tool_calls message but before execution
-        conversation_key = f"__conversation__{agent.name}"
-        if conversation_key in result1.messages[0].__dict__.get("metadata", {}):
-            # Get current context
-            record = await runtime.state_store.get_execution(exec_id)
-            checkpoint = await runtime.state_store.latest_checkpoint(exec_id)
-
-            if checkpoint:
-                # Add an unanswered tool call to the conversation
-                test_call = ToolCall(id="call_test_123", name="tracked_tool",
-                                   arguments={"value": "replay_test"})
-                fake_conversation = [
-                    Message.user("test input"),
-                    Message.assistant(None, [test_call])
-                ]
-                checkpoint.state[conversation_key] = [m.to_dict() for m in fake_conversation]
-                await runtime.state_store.save_checkpoint(checkpoint)
-
-                # Mark as RUNNING to allow resume
-                record.status = ExecutionStatus.RUNNING
-                await runtime.state_store.save_execution(record)
-
-                # Resume should replay the pending tool call
-                result2 = await runtime.resume(exec_id)
-
-                # The tool should have been called with the pending call
-                assert "replay_test" in tool_call_ids
+        agent = Agent(name="test-agent", model="fake", instructions="t",
+                      tools=[tracked_tool])
+        # Fabricate the state a crash would leave behind
+        exec_id = "exec_crashed"
+        await runtime.state_store.save_execution(ExecutionRecord(
+            execution_id=exec_id, status=ExecutionStatus.FAILED, input="go",
+            executable=agent.name))
+        pending = ToolCall(id="call_fixed", name="tracked_tool",
+                           arguments={"value": "replay"})
+        conversation = [Message.user("go"), Message.assistant(None, [pending])]
+        await runtime.state_store.save_checkpoint(Checkpoint(
+            execution_id=exec_id, model_calls=1,
+            state={"__conversation__test-agent":
+                   [m.to_dict() for m in conversation]}))
+        result = await runtime.resume(exec_id, executable=agent)
+        assert result.succeeded and result.output == "Done after resume"
+        assert seen == ["replay"]                    # replayed exactly once
+        events = await runtime.event_store.get_events(exec_id)
+        ids = [e.payload["tool_call_id"] for e in events
+               if e.type == "tool.completed"]
+        assert ids == ["call_fixed"]                 # same id -> same idem. key
 
 
 class TestIdempotencyKeyInjection:

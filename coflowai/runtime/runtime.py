@@ -9,6 +9,7 @@ import time
 from typing import Any, AsyncIterator, Iterable
 
 from ..approvals.approval import APPROVALS_STATE_KEY, ApprovalRecord, ApprovalRequired
+from ..core.cache import BoundedCache
 from ..core.context import ExecutionContext, RuntimeServices
 from ..core.exceptions import (
     ApprovalRejected,
@@ -69,7 +70,17 @@ class Runtime:
                  metrics: MetricsSink | None = None,
                  sandbox: Sandbox | None = None,
                  default_policy: ExecutionPolicy | None = None,
-                 permissions: PermissionSet | Iterable[str] | None = None) -> None:
+                 permissions: PermissionSet | Iterable[str] | None = None,
+                 cache_size: int | None = 1024,
+                 cache_ttl_seconds: float | None = None,
+                 lock_ttl_seconds: float = 60.0) -> None:
+        """``cache_size``/``cache_ttl_seconds`` bound the per-execution
+        in-process caches (executables, policies, tracers, usage).  The state
+        store stays authoritative: an evicted policy is rebuilt from the
+        execution record, and an evicted executable must be passed to
+        ``resume``/``approve`` explicitly (as a fresh process would).
+        ``lock_ttl_seconds`` is the execution lease; a heartbeat renews it every
+        ttl/3, so it only bounds how long a crashed worker blocks a takeover."""
         self.event_store = event_store or InMemoryEventStore()
         self.publisher = EventPublisher(self.event_store)
         self.state_store = state_store or InMemoryStateStore()
@@ -84,11 +95,18 @@ class Runtime:
                             else PermissionSet(permissions)
                             if permissions is not None else PermissionSet.all())
 
+        if lock_ttl_seconds <= 0:
+            raise ValueError("lock_ttl_seconds must be positive")
+        self.lock_ttl_seconds = lock_ttl_seconds
         self._running: dict[str, ExecutionContext] = {}
-        self._executables: dict[str, Executable] = {}
-        self._policies: dict[str, ExecutionPolicy] = {}
-        self._tracers: dict[str, Tracer] = {}
-        self._usage: dict[str, UsageTracker] = {}
+        self._executables: BoundedCache[str, Executable] = BoundedCache(
+            cache_size, cache_ttl_seconds)
+        self._policies: BoundedCache[str, ExecutionPolicy] = BoundedCache(
+            cache_size, cache_ttl_seconds)
+        self._tracers: BoundedCache[str, Tracer] = BoundedCache(
+            cache_size, cache_ttl_seconds)
+        self._usage: BoundedCache[str, UsageTracker] = BoundedCache(
+            cache_size, cache_ttl_seconds)
 
     # ------------------------------------------------------------- factories
     @classmethod
@@ -479,7 +497,7 @@ class Runtime:
         self._policies[execution_id] = context.policy
         self._running[execution_id] = context
 
-        lock_ttl = 60.0
+        lock_ttl = self.lock_ttl_seconds
         if not await self.state_store.acquire_lock(execution_id, ttl=lock_ttl):
             raise ExecutionError("execution is already running elsewhere",
                                  execution_id=execution_id)
@@ -544,10 +562,10 @@ class Runtime:
                              context: ExecutionContext) -> ExecutionResult:
         timeout = context.policy.timeout_seconds
         if timeout is None:
-            return await target.execute(context)
+            return _as_result(await target.execute(context), context)
         try:
             async with asyncio.timeout(timeout):
-                return await target.execute(context)
+                return _as_result(await target.execute(context), context)
         except TimeoutError as exc:
             raise ExecutionTimeout("execution timeout exceeded", cause=exc,
                                    execution_id=context.execution_id,
@@ -671,6 +689,13 @@ class Runtime:
 
 
 # ------------------------------------------------------------------ helpers
+def _as_result(value: Any, context: ExecutionContext) -> ExecutionResult:
+    """Wrap bare return values so custom executables can't crash the runtime."""
+    if isinstance(value, ExecutionResult):
+        return value
+    return ExecutionResult(execution_id=context.execution_id,
+                           status=ExecutionStatus.COMPLETED, output=value,
+                           usage=context.usage_snapshot())
 def _status_for(error: BaseException) -> ExecutionStatus:
     if isinstance(error, ExecutionTimeout):
         return ExecutionStatus.TIMED_OUT

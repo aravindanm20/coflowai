@@ -68,15 +68,49 @@ class JsonlEventStore(EventStore):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.touch(exist_ok=True)
         self._lock = asyncio.Lock()
+        # execution_id -> last sequence, plus the byte offset indexed so far.
+        # Appends are O(1) amortised: only bytes written since the last append
+        # (by this or another process) are scanned -- the previous version
+        # re-read and parsed the whole log on every event (O(n^2) overall).
+        self._sequences: dict[str, int] = {}
+        self._indexed_bytes = 0
+
+    def _catch_up(self) -> None:
+        """Index any complete lines appended since ``_indexed_bytes``."""
+        size = self.path.stat().st_size
+        if size < self._indexed_bytes:          # truncated/rotated -> rebuild
+            self._sequences.clear()
+            self._indexed_bytes = 0
+        if size == self._indexed_bytes:
+            return
+        with self.path.open("rb") as handle:
+            handle.seek(self._indexed_bytes)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    break                       # partial line from a writer
+                self._indexed_bytes += len(raw)
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue                    # skip a corrupt line
+                exec_id = data.get("execution_id")
+                seq = data.get("sequence") or self._sequences.get(exec_id, 0) + 1
+                if exec_id is not None:
+                    self._sequences[exec_id] = max(self._sequences.get(exec_id, 0),
+                                                   int(seq))
 
     async def append(self, event: Event) -> Event:
         async with self._lock:
-            existing = sum(
-                1 for e in self._read() if e.execution_id == event.execution_id
-            )
-            event.sequence = existing + 1
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event.to_dict(), default=str) + "\n")
+            self._catch_up()
+            event.sequence = self._sequences.get(event.execution_id, 0) + 1
+            payload = (json.dumps(event.to_dict(), default=str) + "\n").encode("utf-8")
+            with self.path.open("ab") as handle:
+                handle.write(payload)
+            self._sequences[event.execution_id] = event.sequence
+            self._indexed_bytes += len(payload)
             return event
 
     async def get_events(self, execution_id: str) -> list[Event]:
@@ -92,7 +126,11 @@ class JsonlEventStore(EventStore):
         if not self.path.exists():
             return []
         events: list[Event] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                events.append(Event.from_dict(json.loads(line)))
+        with self.path.open(encoding="utf-8") as handle:   # stream, don't slurp
+            for line in handle:
+                if line.strip():
+                    try:
+                        events.append(Event.from_dict(json.loads(line)))
+                    except ValueError:
+                        continue
         return events
